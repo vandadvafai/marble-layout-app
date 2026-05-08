@@ -236,9 +236,26 @@ class RiskFlag(BaseModel):
     message: str
 
 
+PieceRole = Literal["main", "offcut"]
+
+
 class PlacedPiece(BaseModel):
     piece_id: str
     slab_id: str
+    # `source_slab_id` is the original physical slab the cut was taken
+    # from. Today this always equals `slab_id`; the field exists so a
+    # future "reused offcut from elsewhere" extension can distinguish
+    # source slab from the slab record this piece is attributed to.
+    # When omitted in input JSON, defaults to None and consumers should
+    # treat it as equal to `slab_id`.
+    source_slab_id: str | None = None
+    # 1-based index of this piece within its source slab. Multiple
+    # pieces from the same physical slab (main + offcut, or hole-split
+    # sub-pieces) get incrementing values: 1, 2, 3, …
+    piece_index_from_slab: int = 1
+    # `main` for the strategy's primary placement, `offcut` for pieces
+    # cut from leftover slab material in a second pass.
+    piece_role: PieceRole = "main"
     project_polygon: PolygonCoords
     slab_polygon: PolygonCoords
     rotation: float = 0.0
@@ -258,25 +275,44 @@ class Seam(BaseModel):
 class ReviewMarker(BaseModel):
     review_id: str
     type: str
-    location: Point
+    # Optional because some markers (e.g. `incomplete_coverage`,
+    # `insufficient_inventory`) describe the layout as a whole rather
+    # than a specific point in project space.
+    location: Point | None = None
     related_piece_ids: list[str] = Field(default_factory=list)
     severity: Literal["low", "medium", "high"] = "medium"
     message: str
 
 
+LayoutStatus = Literal["complete", "partial", "failed"]
+InventoryStatus = Literal["sufficient", "insufficient", "unknown"]
+
+
 class LayoutMetrics(BaseModel):
+    # Project-coverage view (how much of the floor was actually clad).
+    project_usable_area: float = 0.0
     installed_area: float = 0.0
+    uncovered_area: float = 0.0
+    coverage_percentage: float = 0.0
+    # Slab-usage view (how efficiently the consumed slabs were used).
     total_slab_area_used: float = 0.0
     waste_area: float = 0.0
     waste_percentage: float = 0.0
+    # Offcut tracking is future work; today reusable_offcut_area is
+    # always 0 and non_reusable_waste_area mirrors waste_area.
     reusable_offcut_area: float = 0.0
     non_reusable_waste_area: float = 0.0
+    # Counters.
     piece_count: int = 0
     slabs_used: int = 0
-    cut_count_estimate: int = 0
     seam_count: int = 0
     total_seam_length: float = 0.0
     small_piece_count: int = 0
+    # High-level status flags. See SCHEMA.md for the decision rules.
+    layout_status: LayoutStatus = "failed"
+    inventory_status: InventoryStatus = "unknown"
+    # Placeholders pending further work — see LIMITATIONS.md.
+    cut_count_estimate: int = 0
     cutting_complexity_score: int = 1
     estimated_production_difficulty: Literal["low", "medium", "high"] = "low"
 

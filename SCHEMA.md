@@ -218,28 +218,52 @@ piece without dropping any of them.
 | `score` | Composite score. **MVP returns 0**; populated when richer scoring lands. |
 | `metrics` | See below. |
 | `placed_pieces` | The slab placement (see below). |
-| `seams` | Reserved. MVP returns `[]`. |
-| `review_markers` | Reserved (small piece, near defect, etc.). MVP returns `[]`. |
+| `seams` | List of detected seam segments between adjacent pieces (see below). One entry per disjoint shared edge. |
+| `review_markers` | Designer-attention notes (skipped placements, risk-flagged pieces, etc.). |
 | `explanation` | Plain-English `summary` and `tradeoffs` list. |
 
 ### `metrics`
 
 | Field | MVP populated? | Meaning |
 |-------|----------------|---------|
-| `installed_area` | yes | Sum of piece areas (mm²). |
-| `total_slab_area_used` | yes | Sum of full areas of every slab a piece references. (Offcut reuse is off, so a slab is fully consumed by any single piece taken from it.) |
+**Project-coverage view** — how much of the floor was clad:
+
+| Field | MVP populated? | Meaning |
+|-------|----------------|---------|
+| `project_usable_area` | yes | Project boundary area minus holes (mm²). The total surface that should ideally be covered. |
+| `installed_area` | yes | Sum of placed piece areas (mm²). The canonical "what was actually clad" field — there is no separate `covered_area`. |
+| `uncovered_area` | yes | `max(project_usable_area − installed_area, 0)`. |
+| `coverage_percentage` | yes | `installed_area / project_usable_area × 100`. Tells you how much of the project is finished. |
+| `layout_status` | yes | `"complete"` if `uncovered_area` is within floating-point tolerance of zero, `"partial"` if some area is uncovered, `"failed"` if no pieces were placed at all. |
+| `inventory_status` | yes | `"sufficient"` whenever the layout is complete; `"insufficient"` when every input slab contributed and the layout is still partial; `"unknown"` when coverage is incomplete but slabs remain in inventory (the engine had material but the strategy couldn't place it). |
+
+**Slab-usage view** — how efficiently the consumed slabs were used:
+
+| Field | MVP populated? | Meaning |
+|-------|----------------|---------|
+| `total_slab_area_used` | yes | Sum of full areas of every slab a piece references. Offcut reuse is off, so a slab is fully consumed by any single piece taken from it. |
 | `waste_area` | yes | `total_slab_area_used − installed_area`. |
-| `waste_percentage` | yes | `waste_area / total_slab_area_used × 100`. |
+| `waste_percentage` | yes | `waste_area / total_slab_area_used × 100`. **Slab efficiency**, not project completion — a layout can have `waste_percentage = 0` and `coverage_percentage = 12`. |
 | `reusable_offcut_area` | no (always 0) | Reserved for offcut tracking. |
 | `non_reusable_waste_area` | yes (= `waste_area`) | Reserved; equals `waste_area` until offcut tracking lands. |
+
+**Counters and seam metrics:**
+
+| Field | MVP populated? | Meaning |
+|-------|----------------|---------|
 | `piece_count` | yes | Number of emitted pieces. |
 | `slabs_used` | yes | Distinct `slab_id` values across all pieces. |
-| `cut_count_estimate` | no (always 0) | Reserved for cut-planning module. |
-| `seam_count` | no (always 0) | Reserved for seam detection. |
-| `total_seam_length` | no (always 0) | Reserved. |
+| `seam_count` | yes | Number of `Seam` entries in `layout_options[i].seams`. |
+| `total_seam_length` | yes | Sum of `Seam.length` across all detected seams (mm). |
 | `small_piece_count` | yes | Number of pieces carrying a `small_piece` risk flag. |
-| `cutting_complexity_score` | no (always 1) | Reserved. |
-| `estimated_production_difficulty` | no (always `"low"`) | Reserved. |
+
+**Placeholder metrics — kept simple by design until the production team defines the rules:**
+
+| Field | MVP populated? | Meaning |
+|-------|----------------|---------|
+| `cut_count_estimate` | no (always 0) | Real cut counting will be defined later with the production team. Do not treat the value as authoritative. |
+| `cutting_complexity_score` | no (always 1) | Real scoring criteria will be defined later. |
+| `estimated_production_difficulty` | no (always `"low"`) | Should not be treated as final production guidance yet. |
 
 ---
 
@@ -262,14 +286,33 @@ This is the heart of the output — what Blender will draw.
 
 | Field | Meaning |
 |-------|---------|
-| `piece_id` | Sequential within an option (`P001`, `P002`, …). |
-| `slab_id` | The source slab this piece was cut from. Always one of the input `slab_id`s. |
+| `piece_id` | Unique within an option. The `balanced` strategy uses sequential `P###` ids (`P001`, `P002`, …). The `lowest_waste` strategy uses `{slab_id}_{N}` ids (`S001_1`, `S001_2`, …) so multiple pieces from one physical slab are obvious at a glance. |
+| `slab_id` | The slab this piece is attributed to. Always one of the input `slab_id`s. |
+| `source_slab_id` | The original physical slab the marble was cut from. Today this always equals `slab_id`. Reserved for a future "reused offcut from elsewhere" extension; present in every emitted piece since 0.1.5. |
+| `piece_index_from_slab` | 1-based index of this piece within its source slab. When a single slab contributes multiple pieces (main + offcuts, or hole-split sub-pieces) the indices are contiguous (`1`, `2`, `3`, …). |
+| `piece_role` | `"main"` for the strategy's primary placement, `"offcut"` for pieces cut from leftover slab material in a second pass. `balanced` always emits `"main"`; `lowest_waste` emits both. |
 | `project_polygon` | **Where the piece sits on the project surface.** Coordinates are in project space. Always a single closed ring (no interior holes). Blender uses this to position the mesh. |
-| `slab_polygon` | **Where the piece was cut from on the original slab.** Coordinates are in slab-local space, with `(0, 0)` at the slab's bottom-left and `(slab.width, slab.height)` at the top-right. This is the same shape as `project_polygon` translated by the placed-rectangle origin (no rotation in MVP). Blender uses this to crop the slab image. |
+| `slab_polygon` | **Where the piece was cut from on the original slab.** Coordinates are in slab-local space, with `(0, 0)` at the slab's bottom-left and `(slab.width, slab.height)` at the top-right. The engine validates that every `slab_polygon` lies inside the source slab rectangle and that pieces cut from the same slab don't overlap in slab-local coordinates. |
 | `rotation` | Degrees (0/90/180/270). MVP always emits `0`. |
 | `texture_transform` | UV-mapping hint for Blender. See below. |
-| `is_full_slab` | `true` if the piece exactly equals the source slab (no clipping happened). Useful for production planners — full slabs need no cuts. |
+| `is_full_slab` | `true` if the piece exactly equals the source slab (no clipping happened). Useful for production planners — full slabs need no cuts. Always `false` for offcut pieces. |
 | `risk_flags` | List of soft warnings attached to this piece. Each entry is `{type, severity, message}`. See below. Empty list when nothing trips a threshold. |
+
+#### Multiple pieces from the same physical slab
+
+The `lowest_waste` strategy may cut a single physical slab into a main
+piece **and** one or more offcut pieces installed in different parts
+of the project. All of these pieces share the same `slab_id` and
+`source_slab_id`; their `piece_id` differs (`S001_1`, `S001_2`, …)
+and their `piece_index_from_slab` increments. Their `slab_polygon`
+rectangles are disjoint in slab-local coordinates (validated by
+`assert_no_slab_local_overlaps`).
+
+If two such pieces happen to touch in the project layout, the seam
+between them **is** detected and emitted in
+`layout_options[i].seams` — the engine never suppresses a seam just
+because both endpoints come from the same physical slab. The designer
+needs to see every cut.
 
 ### `risk_flags[i]`
 
@@ -284,6 +327,36 @@ For every piece carrying ≥ 1 flag, the engine also emits a
 `location` is the piece centroid and `related_piece_ids` references the
 piece. The marker's severity is the worst severity among the piece's
 flags.
+
+---
+
+## Output — `seams[i]`
+
+A seam is the shared boundary segment between two adjacent placed
+pieces. Pieces that meet only at a corner (a single point) or are
+separated by a hole / gap produce no seam.
+
+When two pieces share **multiple disjoint** boundary segments
+(uncommon but possible with non-convex pieces), each segment becomes
+its own `Seam` entry — easier for Blender to render later.
+
+```jsonc
+{
+  "seam_id":    "SM001",
+  "piece_ids":  ["P001", "P002"],
+  "line":       [[3200, 0], [3200, 1800]],
+  "length":     1800,
+  "visibility": "medium"
+}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `seam_id` | Sequential ID (`SM001`, `SM002`, …). Stable across runs. |
+| `piece_ids` | The two pieces whose shared edge this seam is. Order is `[lower-index piece, higher-index piece]` in the placed-piece list, which is deterministic. |
+| `line` | Polyline of `[x, y]` points in project-space mm. For a clean rectangular seam this is exactly two points (the segment endpoints). For a curved or multi-vertex shared edge, all vertices are preserved. |
+| `length` | Length of the polyline in mm. |
+| `visibility` | `low`, `medium`, or `high`. Currently always `"medium"`. Once `Layout.zones` are wired into seam scoring, seams crossing high-visibility zones will report `"high"`. |
 
 ### `texture_transform`
 
@@ -308,11 +381,22 @@ schema change. Until then they are returned as empty/zero/placeholder
 values:
 
 - `layout_options[i].score` (always `0`)
-- `layout_options[i].seams` (always `[]`)
-- `layout_options[i].review_markers` (always `[]`)
-- `metrics.reusable_offcut_area`, `seam_count`, `total_seam_length`,
-  `cut_count_estimate`, `cutting_complexity_score`,
-  `estimated_production_difficulty`
+- `metrics.reusable_offcut_area`, `cut_count_estimate`,
+  `cutting_complexity_score`, `estimated_production_difficulty`
+  (see "Placeholder metrics" above)
+
+`seams` and `review_markers` are now populated. Markers can have one
+of these `type` values:
+
+| Marker type | Source | `location` | Severity |
+|-------------|--------|------------|----------|
+| `empty_slab_placement_skipped` | strategy: cursor landed where the slab couldn't intersect the project | centre of the candidate slab rect | low |
+| `piece_risk` | risk evaluator: piece tripped one or more risk thresholds | piece centroid | piece's worst flag severity |
+| `incomplete_coverage` | engine: `layout_status != "complete"` | `null` (layout-level) | high |
+| `insufficient_inventory` | engine: every input slab consumed and project still uncovered | `null` (layout-level) | high |
+
+`ReviewMarker.location` is therefore `[x, y]` *or* `null`; layout-level
+markers have no specific point in project space.
 
 See [LIMITATIONS.md](LIMITATIONS.md) for what feeds into these once
 implemented.

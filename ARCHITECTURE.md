@@ -41,6 +41,10 @@ For known gaps see [LIMITATIONS.md](LIMITATIONS.md).
                               │
                               ▼
               BalancedStrategy.generate(ctx) → StrategyResult ← strategies/row_based.py
+                  or
+              LowestWasteStrategy.generate(ctx)               ← strategies/lowest_waste.py
+
+              Both call run_row_based_placement(ctx) for phase 1:
               • walk slabs left-to-right, top-to-bottom
               • for each slab, build axis-aligned rectangle
               • clip rectangle to project polygon            ← geometry/clipping.py
@@ -51,11 +55,34 @@ For known gaps see [LIMITATIONS.md](LIMITATIONS.md).
               • if zero valid pieces emerge: emit an
                 `empty_slab_placement_skipped` ReviewMarker,
                 advance the cursor, KEEP the slab in inventory
+              • return (pieces, markers, PlacementRecord[…])
+
+              For lowest_waste, phase 2 runs after phase 1:
+              • _build_offcuts(records): slab-local complement of
+                each placement's used bbox → OffcutRectangle list
+              • _uncovered_components(project, pieces): largest first
+              • _fill_uncovered(...): greedy first-fit; cut a corner-
+                anchored sub-rectangle from the largest fitting
+                offcut, place it (clipped against the project),
+                update offcut + uncovered inventory; repeat
+              • _renumber_by_slab(...): rewrite piece_id as
+                "{slab_id}_{N}", set piece_index_from_slab and
+                piece_role for every piece
                               │
                               ▼
-              _validate_pieces(project, result.pieces)       ← geometry/validation.py
+              _validate_pieces(project, result.pieces, slabs) ← geometry/validation.py
               • each piece ⊂ project (within tolerance)
-              • no two pieces overlap (within tolerance)
+              • no two pieces overlap in project space
+              • every slab_polygon ⊂ its source slab rectangle
+              • no two pieces from the same slab overlap in
+                slab-local coordinates
+                              │
+                              ▼
+              detect_seams(pieces, seam_tolerance)            ← scoring/seams.py
+              • pairwise boundary intersection
+              • LineString / MultiLineString → one Seam each
+              • Point / MultiPoint (corner-only) → ignored
+              • below tolerance → ignored
                               │
                               ▼
               annotate_pieces_with_risks(pieces, thresholds) ← scoring/risk.py
@@ -67,10 +94,27 @@ For known gaps see [LIMITATIONS.md](LIMITATIONS.md).
                               │
                               ▼
               compute_basic_metrics(project, pieces, slabs)  ← scoring/waste.py
-              • installed_area, waste_area, waste_percentage
+              • Project-coverage view:
+                  project_usable_area, installed_area, uncovered_area,
+                  coverage_percentage, layout_status
+              • Inventory comparison:
+                  slabs_used vs len(slabs) → inventory_status
+              • Slab-usage view:
+                  total_slab_area_used, waste_area, waste_percentage
               • piece_count, slabs_used
               metrics.small_piece_count = count of pieces
                 with a `small_piece` flag
+              metrics.seam_count = len(seams)
+              metrics.total_seam_length = Σ seam.length
+                              │
+                              ▼
+              Coverage-warning markers
+              • layout_status != "complete"  → incomplete_coverage
+              • inventory_status = "insufficient" → insufficient_inventory
+              (layout-level markers; ReviewMarker.location is null)
+                              │
+                              ▼
+              Merge strategy + risk + coverage markers, renumber R001…Rn
                               │
                               ▼
               wrap into LayoutOption (option_id, score, metrics, …)
@@ -130,20 +174,22 @@ Categories used below:
 |------|----------|-----------|------|
 | [`polygons.py`](placement_engine/geometry/polygons.py) | **core** | `coords_to_polygon(boundary, holes=None)` · `polygon_to_coords(geom)` · `rectangle(x, y, w, h)` · `bbox_dimensions(geom)` | The only place JSON ↔ Shapely conversion happens. `polygon_to_coords` rejects `MultiPolygon` so callers must split first. |
 | [`clipping.py`](placement_engine/geometry/clipping.py) | **core** | `clip_to_project(slab_rect, project)` · `_flatten_polygons(geom)` · `_split_holes(poly)` | Intersects a slab rectangle with the project polygon and returns a list of **hole-free** sub-polygons. `_flatten_polygons` unwraps `MultiPolygon` / `GeometryCollection` results; `_split_holes` slices polygons that contain interior rings (caused by spanning a project hole) into four bands around the hole's bounding box. |
-| [`validation.py`](placement_engine/geometry/validation.py) | **core** | `GeometryValidationError` · `build_project_polygon(layout)` · `assert_pieces_non_overlapping(pieces)` · `assert_pieces_inside(pieces, project)` | Project polygon assembly (boundary + holes, with containment check) and piece-level invariants. O(n²) overlap check is fine at MVP piece counts. |
+| [`validation.py`](placement_engine/geometry/validation.py) | **core** | `GeometryValidationError` · `build_project_polygon(layout)` · `assert_pieces_non_overlapping(pieces)` · `assert_pieces_inside(pieces, project)` · `assert_pieces_within_slab_bounds(pieces, slabs)` · `assert_no_slab_local_overlaps(pieces)` | Project polygon assembly (boundary + holes, with containment check), project-space invariants, and (for lowest_waste) **material-validity** invariants — every `slab_polygon` lies inside its source slab rectangle, and pieces cut from the same slab don't overlap in slab-local coordinates. The engine runs all four assertions on every strategy's output; passing them is what stops a strategy from "inventing" material. |
 
 ### `placement_engine/strategies/`
 
 | File | Category | Functions / classes | Role |
 |------|----------|---------------------|------|
 | [`base.py`](placement_engine/strategies/base.py) | **core** | `StrategyContext` dataclass · `StrategyResult` dataclass · `PlacementStrategy` abstract base | Strategy interface. Every strategy receives the parsed input and the assembled project polygon, and returns a `StrategyResult` (placed pieces + any review markers raised during generation). Scoring and post-validation are kept out of the strategy. |
-| [`row_based.py`](placement_engine/strategies/row_based.py) | **core** | `_passes_min_size(piece, rules)` · `_piece_from_clip(project_clip, slab, placed_origin, piece_id)` · `RowBasedStrategy(generate)` · `BalancedStrategy` | The only generator implemented today. Lays slabs left-to-right in horizontal rows, clips each placement against the project polygon, and converts each surviving sub-polygon into a `PlacedPiece`. The cursor and the slab pointer advance independently: a placement that yields zero valid pieces emits an `empty_slab_placement_skipped` ReviewMarker and the slab is retried at the next cursor position. `BalancedStrategy` is a thin alias of `RowBasedStrategy`. |
+| [`row_based.py`](placement_engine/strategies/row_based.py) | **core** | `PlacementRecord` · `_passes_min_size(...)` · `_piece_from_clip(...)` · `run_row_based_placement(ctx)` · `RowBasedStrategy(generate)` · `BalancedStrategy` | The shared row-based geometric loop. `run_row_based_placement` is called by both `balanced` and `lowest_waste`; it returns the placed pieces, any skip markers, and one `PlacementRecord` per successful slab placement (slab, project origin, placed size, pieces). `BalancedStrategy` is a thin wrapper that returns the loop's pieces directly. The cursor and slab pointer advance independently: a placement that yields zero valid pieces emits an `empty_slab_placement_skipped` ReviewMarker and the slab is retried at the next cursor position. |
+| [`lowest_waste.py`](placement_engine/strategies/lowest_waste.py) | **core** | `OffcutRectangle` · `_build_offcuts(records)` · `_uncovered_components(...)` · `_best_offcut(...)` · `_shrink_offcut(...)` · `_make_offcut_piece(...)` · `_fill_uncovered(...)` · `_renumber_by_slab(...)` · `LowestWasteStrategy` | Two-phase placement. Phase 1 delegates to `run_row_based_placement` and tags every piece `piece_role="main"`. Phase 2 builds an `OffcutRectangle` inventory from the slab-local complement of each `PlacementRecord`, scans uncovered project components largest-first, and greedily places corner-anchored sub-rectangles of the best fitting offcut until the project is covered or no offcut remains. Pieces are renumbered as `{slab_id}_{N}` and tagged `piece_role="main"` or `piece_role="offcut"` accordingly. Restricted to axis-aligned rectangular offcuts and bbox-rectangular gaps; non-rectangular gap remainders stay uncovered. |
 
 ### `placement_engine/scoring/`
 
 | File | Category | Functions | Role |
 |------|----------|-----------|------|
-| [`waste.py`](placement_engine/scoring/waste.py) | **core** | `_piece_area(piece)` · `compute_basic_metrics(project, pieces, slabs)` · `project_area(project)` | Area-based metrics: installed area (sum of piece areas), total slab area used (sum of full areas of every slab a piece references), waste area, waste percentage, piece count, slabs used. Seam/complexity fields are still placeholders — see [LIMITATIONS.md](LIMITATIONS.md). |
+| [`waste.py`](placement_engine/scoring/waste.py) | **core** | `_piece_area(piece)` · `project_area(project)` · `_layout_status(...)` · `_inventory_status(...)` · `compute_basic_metrics(project, pieces, slabs)` | Two complementary metric views: **project-coverage** (`project_usable_area`, `installed_area`, `uncovered_area`, `coverage_percentage`, `layout_status`, `inventory_status`) and **slab-usage** (`total_slab_area_used`, `waste_area`, `waste_percentage`). The status fields make it impossible for a low-waste-but-poorly-covered layout to look successful. Cutting-complexity / production-difficulty are still hardcoded placeholders — see [LIMITATIONS.md](LIMITATIONS.md). |
+| [`seams.py`](placement_engine/scoring/seams.py) | **core** | `_extract_linestrings(geom)` · `_line_to_coords(line)` · `detect_seams(pieces, tolerance)` · `total_seam_length(seams)` | Seam detector. For every pair of placed pieces, intersects their `boundary` LineStrings; flattens the result through `LineString` / `MultiLineString` / `GeometryCollection`; drops `Point`/`MultiPoint` corner contacts and segments below `Rules.seam_tolerance`. Each surviving line becomes one `Seam` with deterministic `SM###` IDs. |
 | [`risk.py`](placement_engine/scoring/risk.py) | **core** | `evaluate_piece(piece, thresholds)` · `annotate_pieces_with_risks(pieces, thresholds)` · `build_risk_review_markers(pieces)` | Soft warning evaluator. Inspects each placed piece against `Rules.risk_thresholds` and attaches `small_piece`, `narrow_piece`, `short_piece`, `thin_aspect_ratio`, and `irregular_piece` flags. Builds one `piece_risk` `ReviewMarker` per flagged piece, located at the piece centroid. Operates after geometry validation, so flagged pieces are still geometrically valid. |
 
 ### `placement_engine/exporters/`
@@ -188,6 +234,9 @@ All **placeholder** — empty package markers.
 | [`tests/test_engine_with_hole.py`](tests/test_engine_with_hole.py) | End-to-end on the hole example: engine runs, no piece covers the hole, every emitted polygon is single-ring, pieces are disjoint. |
 | [`tests/test_skip_empty_placement.py`](tests/test_skip_empty_placement.py) | Slab-not-silently-consumed behaviour. Synthetic L fixture forces a row-1 skip; the shipped hole example is re-checked to ensure S005 now appears. |
 | [`tests/test_risk_flags.py`](tests/test_risk_flags.py) | Risk evaluator + engine wiring. Direct evaluator tests for each flag type; end-to-end tests that risk flags and `piece_risk` review markers appear in the output JSON; sanity test that default thresholds don't fire on the shipped examples. |
+| [`tests/test_seams.py`](tests/test_seams.py) | Seam detector + engine wiring. Direct unit tests for the vertical-edge / horizontal-edge / corner-only / gap / across-the-hole / sub-tolerance / MultiLineString / Point cases; end-to-end checks that the simple example produces exactly 4 seams totalling 9600 mm and that seam metrics always match the `seams` list. |
+| [`tests/test_coverage_metrics.py`](tests/test_coverage_metrics.py) | Project-coverage view. Bundled examples report `complete`/`sufficient`; insufficient-inventory and corridor fixtures report `partial`/`insufficient` with `incomplete_coverage` and `insufficient_inventory` review markers; flagship business case (zero slab waste with low coverage stays `partial`); schema includes both new and legacy metric fields; empty-pieces case yields `failed`/`unknown`. |
+| [`tests/test_lowest_waste.py`](tests/test_lowest_waste.py) | `lowest_waste` strategy. End-to-end checks that the corridor improves from 90 % (balanced) to 96 % (lowest_waste) with 0 % slab waste; that S006 contributes both a main piece and multiple offcut pieces; that same-slab pieces share `slab_id`/`source_slab_id`; that piece IDs follow `{slab_id}_{N}` with contiguous indices; that no slab_polygon escapes the source slab and no two same-slab pieces overlap in slab-local coords; that lowest_waste reaches 100 % on a fixture where math allows; that insufficient inventory remains honestly reported; that balanced output is unchanged. |
 | [`tests/test_debug_plot.py`](tests/test_debug_plot.py) | Parametrised over both example inputs: `render_layout` writes a real PNG (magic bytes + size). |
 
 ---

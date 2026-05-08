@@ -1,0 +1,49 @@
+{
+  "project_id": "marble_floor_small_single_slab_001",
+  "project_type": "floor",
+  "units": "mm",
+  "layout": {
+    "source_file": {
+      "type": "manual_json",
+      "path": null,
+      "notes": "Small rectangular floor designed to fit within a single slab."
+    },
+    "boundary": [
+      [0, 0],
+      [3000, 0],
+      [3000, 1500],
+      [0, 1500]
+    ],
+    "holes": [],
+    "zones": []
+  },
+  "slabs": [
+    {
+      "slab_id": "S001",
+      "width": 3200,
+      "height": 1800,
+      "thickness": 20,
+      "image_path": "images/slab_S001.png",
+      "vein_direction": "horizontal",
+      "design_notes": "Single slab intended to fully cover the project."
+    }
+  ],
+  "design_requirements": {
+    "general_notes": "Small project that should be coverable with a single slab, testing low seam count and minimal complexity.",
+    "priority": "balanced",
+    "avoid_high_visibility_seams": false,
+    "avoid_defects": true
+  },
+  "rules": {
+    "allowed_rotations": [0, 90],
+    "min_piece_width": 120,
+    "min_piece_height": 120,
+    "min_piece_area": 25000,
+    "seam_tolerance": 2,
+    "allow_partial_slab_use": true,
+    "allow_piece_reuse_from_offcuts": false,
+    "max_waste_percentage_target": 25
+  },
+  "options_requested": ["balanced"],
+  "random_seed": 42
+}

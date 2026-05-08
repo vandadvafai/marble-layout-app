@@ -111,49 +111,83 @@ strategy registry.
 
 ---
 
-## 4. No true offcut optimisation
+## 4. Offcut reuse — basic rectangular only (PARTIALLY in 0.1.5)
 
-**What happens.** A slab is treated as fully consumed the moment any
-piece is cut from it. `compute_basic_metrics` adds the slab's full area
-to `total_slab_area_used` regardless of how much of it the piece
-actually used. `reusable_offcut_area` is always `0`, and
-`rules.allow_piece_reuse_from_offcuts` is accepted but ignored.
+**What happens now (engine 0.1.5+).** The new `lowest_waste` strategy
+runs a second pass after the main row-based placement. For each slab
+that was edge-clipped, the slab-local complement of its used bounding
+box becomes one or more `OffcutRectangle`s. The strategy then walks
+uncovered project components largest-first and greedily cuts
+corner-anchored sub-rectangles from the best fitting offcut to fill
+each gap. Pieces cut from the same physical slab share `slab_id` /
+`source_slab_id` and are emitted as separate installed pieces (with
+`piece_id = "{slab_id}_{N}"`); seams between them are detected just
+like any other seam. See [`scoring/seams.py`](placement_engine/scoring/seams.py)
+and [`strategies/lowest_waste.py`](placement_engine/strategies/lowest_waste.py).
 
-**Why this matters.** Reported `waste_percentage` is a worst-case
-estimate. In a real production line, an installer would re-use the
-unused part of a partially-cut slab elsewhere. The engine has no concept
-of that yet.
+**`balanced` is unchanged.** It still treats each slab as a single
+placement and emits one piece per placement.
 
-**Why it's not fixed yet.** Offcut tracking is a packing problem in its
-own right (which leftover gets re-used where, given size and orientation
-constraints). It belongs to a "lowest-waste" optimisation milestone, not
-the MVP.
+**`waste_percentage` interpretation.** For `lowest_waste`, a slab is
+"consumed" the moment **any** piece is cut from it; if the strategy
+manages to use all of that slab's material across main + offcut
+pieces, the slab contributes `0` waste. (The corridor fixture shows
+this clearly: `lowest_waste` reports `waste_percentage = 0 %` because
+S006 is fully consumed across one main piece and nine offcut strips.)
 
-**Fix path.** Two pieces:
-1. After clipping, record the unused portion of each placed slab as an
-   "offcut" polygon.
-2. Replace the linear walk over `slabs` with a queue that prefers offcuts
-   large enough for the next placement before reaching for a fresh slab.
-This work pairs naturally with rotation support and a proper
-`LowestWasteStrategy`.
+**What is *still* not solved.**
+
+- **Only axis-aligned rectangular offcuts.** Non-rectangular leftover
+  shapes (which can occur when clipping a slab against an irregular
+  project edge) are bbox-approximated; any non-rectangular slack is
+  treated as waste rather than reused.
+- **Bbox-rectangular gap fills only.** When the uncovered region is a
+  non-rectangular polygon, only the bounding-box portion can be
+  filled; an L-shaped uncovered tail stays uncovered.
+- **Greedy first-fit, no back-tracking.** A genuinely optimal packer
+  would explore alternative cut patterns; for v1 the strategy commits
+  to the largest-fitting offcut.
+- **`reusable_offcut_area` is still always `0`.** The metric is
+  reserved for a future world where offcuts that the strategy chose
+  *not* to use are tracked as available stock; today every offcut
+  either gets reused immediately or is rolled into `waste_area`.
+- **`rules.allow_piece_reuse_from_offcuts` is still accepted but not
+  enforced.** Today `lowest_waste` always reuses; setting this to
+  `false` does nothing. A future tweak should respect the flag.
+
+**Fix path forward.**
+
+1. **Polygon-aware offcut tracking** — replace `OffcutRectangle` with
+   a Shapely-polygon-based representation; subtract used pieces from
+   the slab polygon directly. Lifts the rectangular-only restriction
+   on both offcut shape and gap shape.
+2. **Real `reusable_offcut_area` accounting** — once polygon offcuts
+   exist, leftover material that didn't get used in the current
+   project becomes a per-slab residual the metric can populate.
+3. **Smarter packing** — back-tracking, alternative cut patterns,
+   rotation. Naturally pairs with #6 (rotation support).
+4. **Honour `rules.allow_piece_reuse_from_offcuts = false`** —
+   trivial gate; useful for designers who want a "no-mosaic"
+   guarantee.
 
 ---
 
-## 5. Only one strategy is implemented
+## 5. Only `balanced` and `lowest_waste` ship today
 
-**What happens.** `options_requested` accepts `balanced`, `lowest_waste`,
-`best_visual`, `pattern_match`, `natural_random`, but every value
-currently falls through to the same `BalancedStrategy` (the registry
-in [`engine.py`](placement_engine/engine.py) only contains
-`balanced` → `BalancedStrategy`). Unknown strategy names are silently
-skipped — the engine raises only if **no** option could be generated.
+**What happens.** `options_requested` accepts `balanced`,
+`lowest_waste`, `best_visual`, `pattern_match`, `natural_random`. The
+registry in [`engine.py`](placement_engine/engine.py) currently
+contains `balanced` and `lowest_waste`; the other three are silently
+skipped — the engine raises only if **no** requested strategy could
+produce an option.
 
-**Mitigation today.** Treat the requested-strategies field as a
-suggestion, not a guarantee. Today only `balanced` produces output.
+**Mitigation today.** Treat `best_visual`, `pattern_match`, and
+`natural_random` as planned-but-unimplemented; the engine doesn't
+error on them so callers can pre-write JSON for the eventual full set.
 
-**Fix path.** Add the four other strategy classes, each (initially) a
-thin wrapper around `RowBasedStrategy` with different slab ordering and
-random-seed handling, and register them in `STRATEGY_REGISTRY`.
+**Fix path.** Add the three remaining strategy classes and register
+them in `STRATEGY_REGISTRY`. Once `cutting_complexity_score` (#9) is
+defined, comparative scoring across strategies becomes meaningful.
 
 ---
 
@@ -178,20 +212,48 @@ allowed rotation and pick the best fit.
 
 ---
 
-## 7. No seam detection or seam scoring
+## 7. Seam detection (IMPLEMENTED in 0.1.3)
 
-**What happens.** `metrics.seam_count` and `metrics.total_seam_length`
-are always `0`. `layout_options[i].seams` is always `[]`. The schema
-slot exists, the data does not.
+**What happens now.**
+[`scoring/seams.py`](placement_engine/scoring/seams.py) runs after
+geometry validation. For every pair of placed pieces it intersects
+their `boundary` LineStrings and inspects the result:
+- `LineString` → one `Seam`
+- `MultiLineString` → one `Seam` per disjoint segment
+- `Point` / `MultiPoint` (corner-only contact) → ignored
+- segment length below `Rules.seam_tolerance` → ignored
+- pieces separated by a hole or a gap → no intersection, no seam
 
-**Why this matters.** Seam direction, length, and visibility are
-central to a designer's eye. Without this, the engine can't tell a
-clean two-row layout apart from one with twelve scattered seams.
+The output JSON now contains:
+- `layout_options[i].seams[]` with `seam_id`, `piece_ids`, `line`,
+  `length`, `visibility`
+- `metrics.seam_count` = `len(seams)`
+- `metrics.total_seam_length` = Σ `seam.length`
 
-**Fix path.** Add `scoring/seams.py` that computes shared edges between
-adjacent `PlacedPiece` polygons (use Shapely's `intersection` and filter
-to LineString results). Populate `seams[]` and the seam metric fields.
-Wire the seam count into a future `cutting_complexity_score`.
+Verified by [`tests/test_seams.py`](tests/test_seams.py): the simple
+2 × 2 example produces exactly 4 seams totalling 9 600 mm; the L-shape
+with the column cutout produces 11 seams; corner-only and across-hole
+cases produce none.
+
+**What is *still* not solved.**
+
+- **Seam visibility is always `"medium"`.** `Layout.zones` exist in the
+  schema but the seam detector does not yet check whether a seam
+  crosses a high-visibility zone.
+- **No aesthetic seam ranking** (preferring fewer, longer seams over
+  many short ones; preferring symmetry; preferring axis-aligned over
+  diagonal). Needed before a `pattern_match` strategy is meaningful.
+- **No seam-minimisation strategy.** The current row-based generator
+  doesn't know about seams; it just lays slabs. A future
+  `lowest_waste` / `pattern_match` strategy would optimise for seam
+  count or layout symmetry.
+- **No Blender seam visualisation yet.** The JSON contract is now
+  complete enough to drive one — that work belongs to the future
+  Blender add-on.
+- **The `cutting_complexity_score` and
+  `estimated_production_difficulty` metrics still don't consume seam
+  data** — they remain hardcoded to `1` / `"low"`. Wiring this in is
+  the natural next milestone (see #9).
 
 ---
 
@@ -241,21 +303,34 @@ flags or the schema.
 
 ---
 
-## 9. Cutting-complexity and production-difficulty scores are stubs
+## 9. Cut counting, complexity score, production difficulty are placeholders
 
-**What happens.** `cutting_complexity_score` always returns `1` and
+**What happens.** `cut_count_estimate` always returns `0`,
+`cutting_complexity_score` always returns `1`, and
 `estimated_production_difficulty` always returns `"low"`. The MVP
-populates these with default values so the schema validates.
-`metrics.small_piece_count` is now populated correctly (from the risk
-module — see #8); the other counters (`seam_count`, `cut_count_estimate`)
-are still always `0`.
+populates these with default values so the schema validates and so
+downstream consumers can reserve the keys.
 
-**Why it's not fully fixed.** A meaningful complexity score depends on
-seam detection (#7) which is still pending.
+**Why they're kept as placeholders.** Real cut counting and a
+meaningful complexity score depend on production-line specifics that
+the design / production team has not yet defined. Any formula we ship
+today would be a guess that downstream code might quietly start to
+trust.
 
-**Fix path.** Implement after #7. A reasonable first formula:
-`score = clamp(1, 5, round((piece_count + small_piece_count +
-0.1 * seam_count) / k))`. Risk-flag counts can already feed in.
+`metrics.piece_count`, `slabs_used`, `small_piece_count`,
+`seam_count`, `total_seam_length`, `coverage_percentage`,
+`layout_status`, and `inventory_status` are now all populated honestly,
+so the inputs needed for a real complexity formula are in place when
+the team is ready.
+
+**Fix path (when the team is ready).** Add `scoring/complexity.py`,
+define the cut-counting heuristic and the complexity weights with the
+production team, wire through `engine.py`, and add regression tests
+pinning the scores on the shipped examples. Naturally pairs with the
+next strategy milestone so each strategy can be compared by score.
+
+**Until then:** treat these three fields as advisory only. Do not
+treat them as final production guidance.
 
 ---
 

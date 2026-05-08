@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from shapely.geometry import Polygon
 
+from collections import defaultdict
+
 from placement_engine.config import DEFAULT_OVERLAP_TOLERANCE_MM2
 from placement_engine.geometry.polygons import coords_to_polygon
-from placement_engine.models import Layout
+from placement_engine.models import Layout, PlacedPiece, Slab
 
 
 class GeometryValidationError(ValueError):
@@ -64,3 +66,60 @@ def assert_pieces_inside(pieces: list[Polygon], project: Polygon, tolerance_mm2:
             raise GeometryValidationError(
                 f"piece {i} extends {outside.area:.2f} mm² outside the project area"
             )
+
+
+def assert_pieces_within_slab_bounds(
+    pieces: list[PlacedPiece],
+    slabs: list[Slab],
+    tolerance_mm: float = 0.5,
+) -> None:
+    """Every `slab_polygon` must lie inside its source slab rectangle.
+
+    We check coordinate ranges rather than constructing a Shapely polygon
+    per slab: it's faster, and offcut sub-polygons are always axis-aligned
+    so a coordinate range check is exact.
+    """
+    slab_lookup = {s.slab_id: s for s in slabs}
+    for i, piece in enumerate(pieces):
+        slab = slab_lookup.get(piece.source_slab_id or piece.slab_id)
+        if slab is None:
+            raise GeometryValidationError(
+                f"piece {piece.piece_id!r} references unknown slab "
+                f"{piece.slab_id!r}"
+            )
+        for x, y in piece.slab_polygon:
+            if x < -tolerance_mm or x > slab.width + tolerance_mm:
+                raise GeometryValidationError(
+                    f"piece {piece.piece_id!r} slab_polygon x={x} is outside "
+                    f"slab '{slab.slab_id}' [0, {slab.width}]"
+                )
+            if y < -tolerance_mm or y > slab.height + tolerance_mm:
+                raise GeometryValidationError(
+                    f"piece {piece.piece_id!r} slab_polygon y={y} is outside "
+                    f"slab '{slab.slab_id}' [0, {slab.height}]"
+                )
+
+
+def assert_no_slab_local_overlaps(
+    pieces: list[PlacedPiece],
+    tolerance_mm2: float = DEFAULT_OVERLAP_TOLERANCE_MM2,
+) -> None:
+    """Pieces cut from the same physical slab must not overlap in
+    slab-local coordinates — i.e. the engine must never claim the same
+    chunk of marble was used twice.
+    """
+    by_slab: dict[str, list[PlacedPiece]] = defaultdict(list)
+    for piece in pieces:
+        sid = piece.source_slab_id or piece.slab_id
+        by_slab[sid].append(piece)
+    for slab_id, group in by_slab.items():
+        polys = [coords_to_polygon(p.slab_polygon) for p in group]
+        for i in range(len(polys)):
+            for j in range(i + 1, len(polys)):
+                inter = polys[i].intersection(polys[j])
+                if not inter.is_empty and inter.area > tolerance_mm2:
+                    raise GeometryValidationError(
+                        f"pieces {group[i].piece_id!r} and {group[j].piece_id!r} "
+                        f"overlap in slab '{slab_id}' coordinates by "
+                        f"{inter.area:.2f} mm²"
+                    )

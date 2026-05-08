@@ -1,0 +1,46 @@
+{
+  "project_id": "marble_floor_lowest_waste_corridor_offcut_001",
+  "project_type": "floor",
+  "units": "mm",
+  "layout": {
+    "source_file": {
+      "type": "manual_json",
+      "path": null,
+      "notes": "Long corridor that exercises offcut reuse: 200 mm height gap above the main slab row must be filled from leftover material on already-used slabs."
+    },
+    "boundary": [
+      [0, 0],
+      [18000, 0],
+      [18000, 2000],
+      [0, 2000]
+    ],
+    "holes": [],
+    "zones": []
+  },
+  "slabs": [
+    {"slab_id": "S001", "width": 3200, "height": 1800, "thickness": 20, "image_path": "images/slab_S001.png", "vein_direction": "horizontal"},
+    {"slab_id": "S002", "width": 3200, "height": 1800, "thickness": 20, "image_path": "images/slab_S002.png", "vein_direction": "horizontal"},
+    {"slab_id": "S003", "width": 3200, "height": 1800, "thickness": 20, "image_path": "images/slab_S003.png", "vein_direction": "horizontal"},
+    {"slab_id": "S004", "width": 3200, "height": 1800, "thickness": 20, "image_path": "images/slab_S004.png", "vein_direction": "horizontal"},
+    {"slab_id": "S005", "width": 3200, "height": 1800, "thickness": 20, "image_path": "images/slab_S005.png", "vein_direction": "horizontal"},
+    {"slab_id": "S006", "width": 3200, "height": 1800, "thickness": 20, "image_path": "images/slab_S006.png", "vein_direction": "horizontal"}
+  ],
+  "design_requirements": {
+    "general_notes": "Cost-sensitive corridor. Maximise coverage and minimise full-slab usage; visual matching is secondary.",
+    "priority": "lowest_waste",
+    "avoid_high_visibility_seams": false,
+    "avoid_defects": true
+  },
+  "rules": {
+    "allowed_rotations": [0, 90],
+    "min_piece_width": 100,
+    "min_piece_height": 100,
+    "min_piece_area": 10000,
+    "seam_tolerance": 2,
+    "allow_partial_slab_use": true,
+    "allow_piece_reuse_from_offcuts": true,
+    "max_waste_percentage_target": 30
+  },
+  "options_requested": ["balanced", "lowest_waste"],
+  "random_seed": 42
+}

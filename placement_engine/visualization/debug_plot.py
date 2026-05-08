@@ -91,7 +91,12 @@ def render_layout(
     # Review markers: a small ring at each marker location so the designer
     # sees where the engine wants attention, even when the piece itself is
     # invisible (e.g. an empty-placement skip outside the project area).
+    # Layout-level markers (incomplete_coverage, insufficient_inventory)
+    # have no specific location and are surfaced via the plot title and
+    # the JSON output instead.
     for marker in option.review_markers:
+        if marker.location is None:
+            continue
         mx, my = marker.location
         ax.plot(
             mx, my, marker="o", markersize=10,
@@ -110,6 +115,17 @@ def render_layout(
                 hatch="///",
                 linewidth=1.0,
             )
+        )
+
+    # Seams: thin dashed lines drawn on top of the pieces. Drawn before
+    # the boundary so the boundary still wins where they overlap.
+    for seam in option.seams:
+        xs = [pt[0] for pt in seam.line]
+        ys = [pt[1] for pt in seam.line]
+        ax.plot(
+            xs, ys,
+            color="black", linewidth=0.8, linestyle="--", alpha=0.6,
+            zorder=3,
         )
 
     # Project boundary on top, no fill.
@@ -139,8 +155,9 @@ def render_layout(
     ax.set_title(
         f"{project_input.project_id}  |  strategy={option.strategy}  |  "
         f"pieces={m.piece_count}  slabs={m.slabs_used}  "
-        f"waste={m.waste_percentage:.1f}%",
-        fontsize=11,
+        f"coverage={m.coverage_percentage:.1f}% ({m.layout_status})  "
+        f"waste={m.waste_percentage:.1f}%  seams={m.seam_count}",
+        fontsize=10,
     )
     ax.set_xlabel("x (mm)")
     ax.set_ylabel("y (mm)")
