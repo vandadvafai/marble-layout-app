@@ -350,6 +350,109 @@ contract.
 
 ---
 
+## 10d. DWG conversion not implemented; DXF pipeline validated first (0.1.8)
+
+**Where we are.** The standardized-DXF pipeline is validated
+end-to-end by [`run_dxf_validation_suite.py`](run_dxf_validation_suite.py)
+across every demo DXF. Test slab inventories are generated
+synthetically and sized by an area-based estimate
+([`placement_engine/utils/test_inventory.py`](placement_engine/utils/test_inventory.py)).
+
+**What is still not solved.**
+
+- **No DWG→DXF conversion.** Designers still export DXF from
+  Rhino/AutoCAD by hand. Building the converter is the next milestone —
+  deliberately sequenced *after* the DXF pipeline is proven solid.
+- **Test slabs are synthetic.** `generate_test_slabs` produces
+  placeholder material, not the real company slab database. The image
+  paths (`images/test_slabs/S###.png`) are fake. When the slab
+  database lands, the engine reads inventory from it instead.
+- **The area-based slab estimate is approximate.** `estimate_slab_count`
+  uses `ceil(area / slab_area × 1.25)`. It does **not** model
+  whole-slab waste on thin rows. The `balanced` row-based strategy can
+  therefore fall short of 100 % coverage even with a nominally
+  "sufficient" inventory — the validation suite reports this per
+  strategy. `lowest_waste` reaches 100 % on the same inventory because
+  it reuses offcuts. This is the documented behaviour of Limitations
+  #2 and #4, not a new bug; the validation summary's cross-strategy
+  notes make it explicit.
+
+---
+
+## 10c. Standardized CAD intake — clean DXFs only (NEW in 0.1.7)
+
+**What happens now.**
+[`placement_engine/cad_intake/`](placement_engine/cad_intake/) plus the
+[`cad_to_input.py`](cad_to_input.py) and [`inspect_cad.py`](inspect_cad.py)
+CLIs convert a **standardized DXF** into the engine input JSON.
+Designers prepare the surface in Rhino/AutoCAD on these layers:
+
+  * `AI_PROJECT_BOUNDARY` — exactly one closed polyline (the outer surface)
+  * `AI_HOLES_CUTOUTS` — zero or more closed polylines (holes/cutouts)
+  * `AI_IGNORE` — silently ignored
+
+The intake reads `LWPOLYLINE` and `POLYLINE` (both must be closed),
+validates the boundary and holes with Shapely, and writes an
+engine-compatible JSON with sensible default rules + design
+requirements. `--include-test-slabs` attaches the default 6 ×
+3 200 × 1 800 inventory so the JSON runs through the engine
+immediately; without it the JSON is a draft the designer fills in.
+
+**What is *still* not solved.**
+
+- **No native DWG parsing.** Designers convert DWG → DXF in
+  Rhino/AutoCAD; native DWG would require either a closed-source
+  toolchain (ODA) or a heavier dependency, and isn't worth it for the
+  MVP.
+- **No automatic DWG→DXF conversion** inside the tool. Same reasoning.
+- **No arbitrary architectural plan understanding.** The intake
+  intentionally does not infer the project boundary or rooms from
+  messy customer drawings. Layers must be standardized first.
+- **No splines, arcs, hatches, blocks, or LINE chains.** Any of those
+  on a required layer raises `CADIntakeError` with a designer-friendly
+  hint (e.g. "Convert arcs to polyline segments — Rhino: _Convert /
+  AutoCAD: PEDIT"). Designers convert in Rhino/AutoCAD first.
+- **No rescaling.** Coordinates are passed through as-is; the intake
+  assumes the DXF is in millimetres. A future flag could add unit
+  conversion.
+- **No automatic re-orientation.** The DXF coordinate system is used
+  verbatim — if the customer's plan is rotated or offset weirdly,
+  the designer should reset it in Rhino/AutoCAD before export.
+
+---
+
+## 10b. CAD hand-off is an editable review draft, not factory output (NEW in 0.1.6)
+
+**What happens now.**
+[`placement_engine/exporters/dxf_exporter.py`](placement_engine/exporters/dxf_exporter.py)
+and [`placement_engine/exporters/markdown_report.py`](placement_engine/exporters/markdown_report.py)
+plus the [`export_package.py`](export_package.py) CLI generate a
+hand-off bundle for each layout option: a clean DXF (project boundary,
+holes, slab pieces, offcut pieces, seams, piece labels) plus a
+verbose Markdown report carrying every metric, every piece bounding
+box, every seam, and every review marker with addresses and
+suggested actions. The DXF intentionally omits warning circles —
+warnings live in the report so the drawing stays usable in
+Rhino/AutoCAD without cleanup.
+
+**What is still not solved.**
+
+- **Final factory cutting DXF is not produced.** The current DXF is a
+  geometry review draft. The final factory format will be defined
+  with the production team and the future slab database.
+- **DWG is not exported directly.** Designers convert in Rhino/AutoCAD
+  via "save as" if a customer needs it.
+- **PDF report is not generated.** The Markdown is a clean precursor;
+  add `markdown` → `pandoc` / `weasyprint` later if needed.
+- **No bilingual / customer-friendly version of the report.** Today's
+  report is engineering-readable; a designer-edited customer
+  presentation is out of scope.
+- **Text label height is auto-scaled but not designer-configurable.**
+  A designer-supplied scale factor would let teams match their
+  established Rhino/AutoCAD conventions.
+
+---
+
 ## 11. No image analysis
 
 **What happens.** `slab.image_path` is stored on each `PlacedPiece` via

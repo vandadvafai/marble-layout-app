@@ -6,6 +6,26 @@ and output. Field names match the JSON exactly. All distances are
 
 The full source of truth is [`placement_engine/models.py`](placement_engine/models.py).
 
+### Fields the CAD hand-off package relies on
+
+The DXF exporter and Markdown report read these fields directly. None
+of them are new in this milestone, but it is worth knowing which
+parts of the schema are now load-bearing for the Rhino/AutoCAD
+workflow:
+
+- **Project geometry** — `layout.boundary`, `layout.holes` (from the
+  original input JSON; the layout output JSON does not currently
+  echo these, so the exporter takes the input as a separate argument)
+- **Pieces** — `placed_pieces[i].project_polygon`,
+  `placed_pieces[i].slab_polygon`, `piece_id`, `slab_id`,
+  `source_slab_id`, `piece_role`, `is_full_slab`, `risk_flags`
+- **Seams** — `layout_options[i].seams` (every entry: `seam_id`,
+  `piece_ids`, `line`, `length`)
+- **Review markers** — `layout_options[i].review_markers` (every entry:
+  `review_id`, `type`, `severity`, `location`, `related_piece_ids`,
+  `message`)
+- **Metrics** — every field of `LayoutMetrics`
+
 ---
 
 ## Conventions
@@ -72,6 +92,12 @@ Describes the surface to be tiled.
 | `boundary` | The outer outline of the surface. A single polygon, ≥ 3 points. Self-intersecting polygons are rejected. |
 | `holes` | List of polygons to subtract from the boundary (columns, drains, openings). Each hole must lie **fully inside** the boundary or input is rejected. Holes may not currently overlap each other. |
 | `zones` | Optional sub-regions of the project (e.g. "entrance", "high-visibility area"). MVP stores them but does not yet use them. |
+
+> **Tip.** `layout.boundary` and `layout.holes` can be generated from a
+> standardized DXF by `cad_to_input.py` — see the
+> [Standardized CAD input workflow](README.md#standardized-cad-input-workflow)
+> section of the README. The DXF must place the outer boundary on
+> layer `AI_PROJECT_BOUNDARY` and any holes on `AI_HOLES_CUTOUTS`.
 
 ### `source_file`
 

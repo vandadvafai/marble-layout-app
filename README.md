@@ -42,6 +42,210 @@ python3 -c "import json; opt = json.load(open('outputs/layout_simple.json'))['la
   [print(f\"  {s['seam_id']}  pieces={s['piece_ids']}  len={s['length']:.0f}\") for s in opt['seams']]"
 ```
 
+## Standardized CAD input workflow
+
+Designers typically receive customer plans as **DWG** files. The
+engine does **not** try to parse messy customer DWGs directly.
+Instead, the design team **standardizes** the surface to be clad in
+Rhino/AutoCAD, exports a clean **DXF**, and feeds that to the intake
+tool.
+
+### Designer steps (Rhino / AutoCAD)
+
+1. Open the customer's DWG.
+2. Isolate the exact surface to be clad.
+3. Place the geometry on the standard layers:
+   - `AI_PROJECT_BOUNDARY` — exactly one closed polyline (the outer surface)
+   - `AI_HOLES_CUTOUTS` — zero or more closed polylines (columns, drains, ...)
+   - `AI_IGNORE` — anything that should be ignored (helper lines, notes)
+4. Save as DXF (R2013 or newer).
+
+### Tool steps
+
+```bash
+# 1. (Optional) Inspect the DXF before converting.
+python3 inspect_cad.py --cad examples/cad_inputs/floor_with_hole_standardized.dxf
+
+# 2. Convert the DXF to engine input JSON.
+python3 cad_to_input.py \
+    --cad examples/cad_inputs/floor_with_hole_standardized.dxf \
+    --out examples/generated/input_floor_with_hole_from_cad.json \
+    --project-id cad_floor_with_hole_001 \
+    --include-test-slabs \
+    --strategy balanced --strategy lowest_waste
+
+# 3. Run the placement engine on the generated JSON.
+python3 run_engine.py \
+    -i examples/generated/input_floor_with_hole_from_cad.json \
+    -o outputs/cad_pipeline.json
+
+# 4. Bundle the result into a CAD hand-off package.
+python3 export_package.py \
+    -i examples/generated/input_floor_with_hole_from_cad.json \
+    -l outputs/cad_pipeline.json \
+    -o outputs/layout_packages/cad_floor_with_hole
+```
+
+Without `--include-test-slabs`, `cad_to_input.py` writes a
+**geometry-only draft** with `"slabs": []`; the designer fills the
+inventory in by hand before running the engine.
+
+### Supported CAD entities (MVP)
+
+- `LWPOLYLINE` (closed)
+- `POLYLINE` (closed)
+
+Splines, arcs, hatches, blocks, and individual lines are **not**
+supported. The intake raises a clear error if it finds them on a
+required layer with a hint about how to convert (typically Rhino's
+`_Convert` or AutoCAD's `PEDIT`).
+
+### Generating demo CAD inputs
+
+For testing the standardized intake (and as a reference for designers
+preparing real files), the repo ships a generator that writes five
+clean synthetic DXFs plus matplotlib PNG previews:
+
+```bash
+python3 generate_demo_cad_inputs.py
+```
+
+This writes:
+
+- DXFs → `examples/cad_inputs/demo/`
+  - `demo_rectangle_floor.dxf` — 6 m × 4 m rectangle
+  - `demo_l_shape_floor.dxf` — 8 m × 4 m L-shape with a notch
+  - `demo_floor_with_column.dxf` — 7 m × 4.5 m floor with a centre column
+  - `demo_irregular_apartment_floor.dxf` — 12 m × 8 m L-shape with two columns and a utility shaft
+  - `demo_long_corridor.dxf` — 18 m × 2 m corridor
+- PNG previews → `outputs/demo_cad_previews/` (one per DXF)
+
+After generation the script runs `inspect_dxf` on every file and exits
+non-zero if any inspection fails. All committed DXFs already pass — they
+can be opened directly in Rhino/AutoCAD to verify the layer convention
+visually, or fed straight into the intake:
+
+```bash
+python3 cad_to_input.py \
+    --cad examples/cad_inputs/demo/demo_floor_with_column.dxf \
+    --out examples/generated/input_demo_floor_with_column.json \
+    --project-id cad_demo_floor_with_column_001 \
+    --include-test-slabs
+python3 run_engine.py    -i examples/generated/input_demo_floor_with_column.json -o /tmp/_demo.json
+python3 export_package.py -i examples/generated/input_demo_floor_with_column.json \
+                          -l /tmp/_demo.json -o outputs/layout_packages/demo_floor_with_column
+```
+
+The PNGs in `outputs/demo_cad_previews/` are deliberately not
+version-controlled (the directory is `.gitignore`d); they're a
+convenience artifact. The DXFs are the authoritative test inputs.
+
+## DXF validation suite
+
+Before building a DWG→DXF converter, the whole standardized-DXF
+pipeline is validated end-to-end: `DXF → intake → engine input JSON
+(+ auto-sized test slabs) → placement engine → DXF/report package →
+summary`.
+
+### Auto-sized test slab inventory
+
+The engine needs slabs. For validation the tool can generate a
+**synthetic** inventory (not the real company slab database) sized to
+the project:
+
+```text
+estimated_slab_count = ceil((project_usable_area / slab_area) * buffer_factor)
+                       # buffer_factor default 1.25, floored at 1
+```
+
+`cad_to_input.py` exposes this via flags:
+
+```bash
+python3 cad_to_input.py \
+    --cad examples/cad_inputs/demo/demo_irregular_apartment_floor.dxf \
+    --out examples/generated/input_apartment.json \
+    --project-id cad_apartment_001 \
+    --include-test-slabs \
+    --test-slab-count auto          # or an explicit integer
+    # --test-slab-width / --test-slab-height / --test-slab-thickness
+    # --slab-buffer-factor 1.25
+```
+
+### Running the suite
+
+```bash
+python3 run_dxf_validation_suite.py \
+    --cad-dir examples/cad_inputs/demo \
+    --out-dir outputs/dxf_validation_runs \
+    --strategies balanced lowest_waste
+```
+
+For every `*.dxf` in `--cad-dir` the suite writes, under
+`outputs/dxf_validation_runs/<case>/`:
+
+```
+cad_inspection.md          what the intake saw
+input_generated.json       the engine input (with test slabs)
+balanced/      layout.json  layout.dxf  layout_report.md  preview.png
+lowest_waste/  layout.json  layout.dxf  layout_report.md  preview.png
+```
+
+and a top-level `validation_summary.md`.
+
+### Reading `validation_summary.md`
+
+- A **Results** table with one row per (DXF × strategy): coverage %,
+  layout/inventory status, slabs generated/used, waste %, pass/fail.
+- **Cross-strategy notes** that call out cases where `balanced` fails
+  but `lowest_waste` passes (expected — the row-based generator wastes
+  whole slabs on thin/notch rows) versus cases where *both* fail
+  (a real issue to investigate).
+- A **Per-case detail** section with every metric.
+
+A case PASSES when the input validates, the engine runs, the output
+files are written, `layout_status == "complete"`,
+`inventory_status == "sufficient"`, and `coverage_percentage >= 99.9`.
+
+All validation outputs land under `outputs/` and are **not**
+version-controlled.
+
+## CAD / Rhino / AutoCAD hand-off
+
+Designers continue working in Rhino/AutoCAD. For each layout the
+engine can produce a hand-off **package** — a folder containing a
+clean editable DXF, a verbose Markdown report, the layout JSON, and an
+optional preview PNG, one set per requested strategy.
+
+```bash
+python3 export_package.py \
+    --input examples/input_lowest_waste_corridor_offcut.json \
+    --layout outputs/validation_runs/layout_lowest_waste_corridor_offcut.json \
+    --out outputs/layout_packages/lowest_waste_corridor
+```
+
+If `--layout` is omitted the engine is run on `--input` directly. Use
+`--strategy lowest_waste` to export only one strategy from a multi-option
+layout, and `--no-preview` to skip the matplotlib PNG.
+
+**What the package contains** (per layout option):
+
+| File | Purpose |
+|---|---|
+| `layout_<strategy>.dxf` | Clean editable geometry (project boundary, holes, slab pieces, offcut pieces, seams, piece labels). Open in Rhino or AutoCAD. |
+| `layout_<strategy>_report.md` | Verbose Markdown report — full metrics table, per-piece table with bounding boxes and centroids, seam table, designer review notes (with addresses and suggested actions), per-piece risk flags, draft-status disclaimers. |
+| `layout_<strategy>.json` | Trimmed engine output for this option only — what produced the DXF and report sitting next to it. |
+| `layout_<strategy>_preview.png` | Optional matplotlib preview (skipped with `--no-preview`). |
+
+**Design intent.** The DXF stays visually clean — no aggressive red
+warning circles, no risk overlays. Subtle reference points appear on
+`REVIEW_REFERENCE_POINTS` for piece-level review markers; everything
+else lives in the Markdown report. The designer uses the DXF to edit
+geometry and the report to address warnings.
+
+**Not in this milestone.** DWG export, final factory cut DXF, PDF
+report, web UI, Blender add-on. The DXF is intended as an editable
+review draft, not a final factory cutting file.
+
 The `--plot` / `-p` flag is optional; without it no PNG is rendered and
 matplotlib is not imported.
 

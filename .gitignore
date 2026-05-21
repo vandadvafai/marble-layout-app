@@ -18,7 +18,27 @@ htmlcov/
 .vscode/
 .idea/
 
-# Generated layout outputs and debug plots
-# (keep the directory itself via outputs/.gitkeep)
-outputs/*
+# Generated outputs — ignored per run, but keep the folder structure
+# in git via the .gitkeep markers re-included below.
+outputs/cad_inspections/**
+outputs/dxf_validation_runs/**
+outputs/layout_packages/**
+outputs/demo_cad_previews/**
+outputs/validation_runs/**
+
 !outputs/.gitkeep
+!outputs/cad_inspections/.gitkeep
+!outputs/dxf_validation_runs/.gitkeep
+!outputs/layout_packages/.gitkeep
+!outputs/demo_cad_previews/.gitkeep
+
+# Duplicate / debug check artifacts
+*_check.json
+*_check.png
+*_check.dxf
+
+# Source test fixtures are NOT ignored:
+#   examples/cad_inputs/**/*.dxf      standardized DXF fixtures
+#   examples/*.json                   engine-input fixtures used by tests
+#   examples/legacy_json_inputs/*.json  retained legacy examples
+#   examples/generated/.gitkeep

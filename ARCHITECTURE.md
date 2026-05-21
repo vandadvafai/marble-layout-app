@@ -12,6 +12,26 @@ For known gaps see [LIMITATIONS.md](LIMITATIONS.md).
 ## High-level data flow
 
 ```
+        (Optional) standardized DXF prepared by the designer
+                              │
+                              ▼
+              ┌──────────────────────────────────┐
+              │  cad_to_input.py  /  inspect_cad.py│
+              │  → placement_engine.cad_intake     │
+              │  • dxf_reader.read_dxf             │
+              │  • entities_on_layer(              │
+              │      AI_PROJECT_BOUNDARY,          │
+              │      AI_HOLES_CUTOUTS)             │
+              │  • geometry_extractor.extract_     │
+              │      closed_polylines              │
+              │  • input_builder.build_project_    │
+              │      input_dict (+ default rules,  │
+              │      default design_requirements,  │
+              │      optional test slab inventory) │
+              │  • writes engine-input JSON        │
+              └──────────────────────────────────┘
+                              │
+                              ▼
                        run_engine.py  (CLI)
                               │
                               ▼
@@ -127,6 +147,18 @@ For known gaps see [LIMITATIONS.md](LIMITATIONS.md).
               • model_dump(mode="json") → indent=2 → disk
                               │
                               ▼
+        if `export_package.py` was used or write_package() called:
+              write_package(project_input, output, target_dir)  ← exporters/package.py
+              • per layout_option:
+                  layout_<strategy>.json (trimmed to one option)
+                  layout_<strategy>.dxf   ← exporters/dxf_exporter.py
+                  layout_<strategy>_report.md ← exporters/markdown_report.py
+                  layout_<strategy>_preview.png (optional)
+              • DXF stays clean (geometry + labels only)
+              • Markdown report carries warnings, addresses,
+                suggested actions, draft-status disclaimers
+                              │
+                              ▼
         if --plot:
               render_layout(project_input, output, png_path) ← visualization/debug_plot.py
               • matplotlib (lazy-imported, Agg backend)
@@ -158,6 +190,9 @@ Categories used below:
 | [LIMITATIONS.md](LIMITATIONS.md) | docs | What the MVP does not yet solve. |
 | [requirements.txt](requirements.txt) | config | Pinned-floor dependencies (shapely, pydantic, numpy, typer, pytest, matplotlib). |
 | [run_engine.py](run_engine.py) | core (CLI) | argparse front end. Calls `engine.load_input_from_file`, `engine.run`, `write_output`, and lazily `render_layout` if `--plot` was passed. No business logic. |
+| [export_package.py](export_package.py) | core (CLI) | CAD hand-off CLI. Reads a project input JSON and (optionally) an existing layout output JSON, then calls `write_package` to produce the per-option DXF + Markdown report + JSON + preview bundle. Supports `--strategy` to filter to one option and `--no-preview` to skip the PNG. |
+| [cad_to_input.py](cad_to_input.py) | core (CLI) | Standardized-CAD intake CLI. Reads a DXF whose surface lives on `AI_PROJECT_BOUNDARY` (+ optional holes on `AI_HOLES_CUTOUTS`), validates the geometry, and writes an engine-input JSON via `placement_engine.cad_intake.build_project_input_dict`. Supports `--include-test-slabs`, `--strategy …`, `--random-seed`. |
+| [inspect_cad.py](inspect_cad.py) | core (CLI) | DXF inspection CLI. Reports layers, entity counts, boundary area / bbox, and hole areas as a Markdown document so designers can verify a DXF before conversion. Exits non-zero when the inspection found errors so it composes with shell pipelines. |
 
 ### `placement_engine/`
 
@@ -197,6 +232,18 @@ Categories used below:
 | File | Category | Functions | Role |
 |------|----------|-----------|------|
 | [`json_exporter.py`](placement_engine/exporters/json_exporter.py) | helper | `write_output(output, path)` | Serialises an `EngineOutput` via `model_dump(mode="json")` and writes it pretty-printed to disk. Creates parent directories. |
+| [`dxf_exporter.py`](placement_engine/exporters/dxf_exporter.py) | helper | `_ensure_layers(doc)` · `_label_text_height(project_input)` · `_piece_centroid(piece)` · `write_dxf(project_input, layout_option, target)` | Writes a clean editable DXF for one layout option using `ezdxf`. Layers: `PROJECT_BOUNDARY`, `HOLES_CUTOUTS`, `SLAB_PIECES`, `OFFCUT_PIECES`, `SEAMS`, `PIECE_LABELS`, `REVIEW_REFERENCE_POINTS`. Pieces become closed `LWPOLYLINE` entities; labels become `TEXT` entities at piece centroids; seams become `LINE` (2-vertex) or `LWPOLYLINE` (multi-vertex). Layout-level review markers (`location=None`) are intentionally **not** rendered — they live in the report. Text height is auto-scaled from the project bbox. Why DXF: Rhino and AutoCAD both ingest DXF cleanly without extra tooling, which is the existing designer workflow. |
+| [`markdown_report.py`](placement_engine/exporters/markdown_report.py) | helper | `_suggested_marker_action(...)` · `_suggested_risk_action(...)` · per-section builders · `write_report(project_input, output, option, target)` | Writes the verbose Markdown companion to the DXF. Sections: title, summary, metrics table, pieces table (bbox + centroid), seams table (endpoints), designer review notes (severity + location + related pieces + message + suggested action), per-piece risk flags, notes & limitations (draft-status disclaimers). Markers and flags carry **addresses** so the designer can locate them in Rhino/AutoCAD. |
+| [`package.py`](placement_engine/exporters/package.py) | helper | `_slug(name)` · `_trim_output_to_one_option(...)` · `write_package(project_input, output, target_dir, options=…, render_preview=…)` | Orchestrates the per-option hand-off bundle: writes `layout_<strategy>.{json,dxf,md}` plus an optional preview PNG into `target_dir`. The trimmed JSON ensures the file next to each DXF/report contains only that option, so designers can't confuse strategies. |
+
+### `placement_engine/cad_intake/`
+
+| File | Category | Functions / classes | Role |
+|------|----------|---------------------|------|
+| [`dxf_reader.py`](placement_engine/cad_intake/dxf_reader.py) | **core** | `CADIntakeError` · layer-name constants (`LAYER_PROJECT_BOUNDARY`, `LAYER_HOLES_CUTOUTS`, `LAYER_IGNORE`) · `read_dxf(path)` · `entities_on_layer(doc, layer)` · `layer_summary(doc)` · `known_layers()` | Thin wrapper around `ezdxf` that opens a DXF, looks up entities by layer, and surfaces a `CADIntakeError` with a designer-actionable message when the file is missing or malformed. The rest of the intake never imports ezdxf directly. |
+| [`geometry_extractor.py`](placement_engine/cad_intake/geometry_extractor.py) | **core** | `extract_closed_polylines(entities, layer_name)` · internal `_is_closed`, `_lwpolyline_to_coords`, `_polyline_to_coords`, `_strip_trailing_duplicate` | Converts `LWPOLYLINE` / `POLYLINE` entities into JSON-style `PolygonCoords`. Raises `CADIntakeError` with conversion hints on the first unsupported entity (`LINE`, `ARC`, `SPLINE`, `HATCH`, `INSERT`, `TEXT`, …) or unclosed polyline encountered. |
+| [`input_builder.py`](placement_engine/cad_intake/input_builder.py) | **core** | `build_project_input_dict(cad_path, …)` · `build_project_input(cad_path, …)` · internal `_validate_boundary`, `_validate_holes`, `_extract_boundary_and_holes` | Pulls the boundary and holes from the DXF, validates them with Shapely (single boundary, holes inside boundary, holes don't overlap), and assembles either a raw dict (geometry-only draft) or a fully-validated `ProjectInput` (with the default 6 × 3 200 × 1 800 test inventory attached). |
+| [`inspection.py`](placement_engine/cad_intake/inspection.py) | helper | `InspectionReport` dataclass · `inspect_dxf(path)` · `format_report_markdown(report)` | Layers found, entity counts, boundary area + bbox, hole count + areas, warnings, errors. `inspect_dxf` never raises for content reasons — every problem is captured in the report's `errors` list. |
 
 ### `placement_engine/visualization/`
 
@@ -237,9 +284,51 @@ All **placeholder** — empty package markers.
 | [`tests/test_seams.py`](tests/test_seams.py) | Seam detector + engine wiring. Direct unit tests for the vertical-edge / horizontal-edge / corner-only / gap / across-the-hole / sub-tolerance / MultiLineString / Point cases; end-to-end checks that the simple example produces exactly 4 seams totalling 9600 mm and that seam metrics always match the `seams` list. |
 | [`tests/test_coverage_metrics.py`](tests/test_coverage_metrics.py) | Project-coverage view. Bundled examples report `complete`/`sufficient`; insufficient-inventory and corridor fixtures report `partial`/`insufficient` with `incomplete_coverage` and `insufficient_inventory` review markers; flagship business case (zero slab waste with low coverage stays `partial`); schema includes both new and legacy metric fields; empty-pieces case yields `failed`/`unknown`. |
 | [`tests/test_lowest_waste.py`](tests/test_lowest_waste.py) | `lowest_waste` strategy. End-to-end checks that the corridor improves from 90 % (balanced) to 96 % (lowest_waste) with 0 % slab waste; that S006 contributes both a main piece and multiple offcut pieces; that same-slab pieces share `slab_id`/`source_slab_id`; that piece IDs follow `{slab_id}_{N}` with contiguous indices; that no slab_polygon escapes the source slab and no two same-slab pieces overlap in slab-local coords; that lowest_waste reaches 100 % on a fixture where math allows; that insufficient inventory remains honestly reported; that balanced output is unchanged. |
+| [`tests/test_dxf_exporter.py`](tests/test_dxf_exporter.py) | DXF exporter contract: file written; all 7 expected layers exist; one closed `LWPOLYLINE` per piece on the right layer; one seam entity per detected seam; a TEXT label exists for every `piece_id`; layout-level review markers (`location=None`) do **not** appear in the DXF. |
+| [`tests/test_markdown_report.py`](tests/test_markdown_report.py) | Markdown report contract: file written; project id, layout/inventory status, coverage and waste percentages all surface in the body; every section header is present; every piece has a row in the pieces table; layout-level markers carry the "no specific point" address; draft-status disclaimers present. |
+| [`tests/test_package_exporter.py`](tests/test_package_exporter.py) | Package orchestrator: one file set per option with the expected naming; preview PNG written when requested; per-option JSON contains only that option (so designers can't confuse strategies); `--strategy` filtering works; raises when no options chosen. |
+| [`tests/test_cad_intake.py`](tests/test_cad_intake.py) | Standardized DXF → engine input pipeline. Happy paths (basic rectangle, rectangle with hole, default rules/design requirements, strategy flag), error paths (missing layer, multiple boundaries, hole outside boundary, unclosed polyline, unsupported entity, self-intersecting boundary, missing file), inspection report (areas + bbox + holes + errors-without-raising), end-to-end test that standardized DXF flows through `engine.run` and `write_package` to produce a full hand-off bundle. |
 | [`tests/test_debug_plot.py`](tests/test_debug_plot.py) | Parametrised over both example inputs: `render_layout` writes a real PNG (magic bytes + size). |
 
 ---
+
+## Standardized-DXF validation workflow
+
+Before a DWG→DXF converter is built, the whole standardized-DXF
+pipeline is validated end-to-end by
+[`run_dxf_validation_suite.py`](run_dxf_validation_suite.py):
+
+```
+   examples/cad_inputs/**/*.dxf
+            │
+            ▼   for each DXF:
+   inspect_dxf  →  cad_inspection.md
+            │
+            ▼
+   build_project_input_dict(test_slab_spec=SlabInventorySpec("auto"))
+       • project usable area  →  estimate_slab_count (ceil, ×1.25 buffer)
+       • generate_test_slabs(n)         ← placement_engine/utils/test_inventory.py
+       • write input_generated.json
+            │
+            ▼
+   ProjectInput.model_validate  →  engine.run
+            │
+            ▼   per layout option (strategy):
+   write_dxf · write_report · render_layout  →  <case>/<strategy>/layout.*
+            │
+            ▼
+   validation_summary.md   (one row per DXF × strategy, pass/fail)
+```
+
+Why this stage exists: it confirms that with a *clean* DXF and a
+*sufficient* slab inventory the pipeline produces complete layouts —
+and it surfaces, honestly, that the row-based `balanced` strategy
+cannot reach 100 % on irregular shapes even with surplus material
+(whole slabs are wasted on thin/notch rows), whereas `lowest_waste`
+can via offcut reuse. That finding is what justifies prioritising
+`lowest_waste` and treating `balanced`'s shortfall as a known
+structural limitation rather than a bug. DWG conversion is only worth
+building once this DXF stage is solid.
 
 ## Key design decisions
 
