@@ -103,9 +103,22 @@ Describes the surface to be tiled.
 
 | Field | Meaning |
 |-------|---------|
-| `type` | One of `manual_json`, `dxf`, `svg`, `pdf`, `image`, `cad_export`. |
-| `path` | Optional path/URI to the source file. |
+| `type` | One of `manual_json`, `dxf`, `svg`, `pdf`, `image`, `cad_export`, `standardized_dxf`, `standardized_dwg_converted_to_dxf`. The CAD intake emits `standardized_dxf` for a DXF input and `standardized_dwg_converted_to_dxf` when a DWG was converted to DXF first. |
+| `path` | Path to the original source file the designer supplied. For a DWG input this is the `.dwg`; for a DXF input it is the `.dxf`. |
+| `converted_dxf_path` | Set only when `type` is `standardized_dwg_converted_to_dxf` — the path of the intermediate DXF the DWG→DXF wrapper produced. `null` otherwise. |
 | `notes` | Free-form designer note. |
+
+When the input was a DWG, `source_file` records both ends of the
+conversion so the provenance is traceable:
+
+```jsonc
+"source_file": {
+  "type": "standardized_dwg_converted_to_dxf",
+  "path": "path/to/standardized_project.dwg",
+  "converted_dxf_path": "outputs/intermediate_cad/project_001/standardized_project.dxf",
+  "notes": "Generated from standardized DWG after internal DWG-to-DXF conversion."
+}
+```
 
 ### `zones[i]`
 

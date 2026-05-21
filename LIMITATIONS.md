@@ -350,7 +350,38 @@ contract.
 
 ---
 
-## 10d. DWG conversion not implemented; DXF pipeline validated first (0.1.8)
+## 10e. DWG support is a conversion wrapper (NEW in 0.1.9)
+
+**What happens now.**
+[`placement_engine/cad_conversion/`](placement_engine/cad_conversion/)
+adds `.dwg` input support by **converting the DWG to a temporary DXF**
+and then running the unchanged DXF intake. `cad_to_input.py`,
+`inspect_cad.py`, and the new `make_package.py` all accept `.dwg`.
+
+**What is still not solved.**
+
+- **DWG support requires an external converter.** Automatic DWG → DXF
+  conversion needs ODA File Converter installed and locatable
+  (`--oda-path`, `ODA_FILE_CONVERTER_PATH`, common paths, or `PATH`).
+  The engine never parses DWG natively.
+- **The fallback when conversion is unavailable** is manual DXF export
+  from Rhino/AutoCAD — pass the `.dxf` to `--cad`. The tool says so
+  explicitly when ODA is missing.
+- **The tool still does not understand arbitrary messy client DWGs.**
+  A DWG must be standardized first (one closed polyline on
+  `AI_PROJECT_BOUNDARY`, optional holes on `AI_HOLES_CUTOUTS`,
+  millimetre scale) exactly as a DXF must be. Conversion changes the
+  file format, not the layer discipline.
+- **If conversion fails** (corrupt DWG, unsupported AutoCAD version,
+  converter not on this machine), the tool reports an actionable error
+  and the manual DXF-export path remains available.
+- **DWG *output* is not generated.** This milestone is DWG *input*
+  only. The CAD hand-off package still emits DXF (see #10b); designers
+  save-as DWG in Rhino/AutoCAD if a customer needs it.
+
+---
+
+## 10d. Standardized-DXF pipeline validated before DWG support (0.1.8)
 
 **Where we are.** The standardized-DXF pipeline is validated
 end-to-end by [`run_dxf_validation_suite.py`](run_dxf_validation_suite.py)
@@ -360,9 +391,6 @@ synthetically and sized by an area-based estimate
 
 **What is still not solved.**
 
-- **No DWG→DXF conversion.** Designers still export DXF from
-  Rhino/AutoCAD by hand. Building the converter is the next milestone —
-  deliberately sequenced *after* the DXF pipeline is proven solid.
 - **Test slabs are synthetic.** `generate_test_slabs` produces
   placeholder material, not the real company slab database. The image
   paths (`images/test_slabs/S###.png`) are fake. When the slab

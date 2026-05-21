@@ -12,11 +12,24 @@ For known gaps see [LIMITATIONS.md](LIMITATIONS.md).
 ## High-level data flow
 
 ```
+        (Optional) standardized DWG prepared by the designer
+                              │
+                              ▼
+              ┌──────────────────────────────────┐
+              │  cad_conversion.convert_cad_to_dxf │
+              │  • .dxf  → passthrough (unchanged) │
+              │  • .dwg  → ODA File Converter      │
+              │            → temporary DXF         │
+              │  • other → UnsupportedCADFormat    │
+              └──────────────────────────────────┘
+                              │  (always a DXF from here on)
+                              ▼
         (Optional) standardized DXF prepared by the designer
                               │
                               ▼
               ┌──────────────────────────────────┐
               │  cad_to_input.py  /  inspect_cad.py│
+              │  /  make_package.py                │
               │  → placement_engine.cad_intake     │
               │  • dxf_reader.read_dxf             │
               │  • entities_on_layer(              │
@@ -191,8 +204,9 @@ Categories used below:
 | [requirements.txt](requirements.txt) | config | Pinned-floor dependencies (shapely, pydantic, numpy, typer, pytest, matplotlib). |
 | [run_engine.py](run_engine.py) | core (CLI) | argparse front end. Calls `engine.load_input_from_file`, `engine.run`, `write_output`, and lazily `render_layout` if `--plot` was passed. No business logic. |
 | [export_package.py](export_package.py) | core (CLI) | CAD hand-off CLI. Reads a project input JSON and (optionally) an existing layout output JSON, then calls `write_package` to produce the per-option DXF + Markdown report + JSON + preview bundle. Supports `--strategy` to filter to one option and `--no-preview` to skip the PNG. |
-| [cad_to_input.py](cad_to_input.py) | core (CLI) | Standardized-CAD intake CLI. Reads a DXF whose surface lives on `AI_PROJECT_BOUNDARY` (+ optional holes on `AI_HOLES_CUTOUTS`), validates the geometry, and writes an engine-input JSON via `placement_engine.cad_intake.build_project_input_dict`. Supports `--include-test-slabs`, `--strategy …`, `--random-seed`. |
-| [inspect_cad.py](inspect_cad.py) | core (CLI) | DXF inspection CLI. Reports layers, entity counts, boundary area / bbox, and hole areas as a Markdown document so designers can verify a DXF before conversion. Exits non-zero when the inspection found errors so it composes with shell pipelines. |
+| [cad_to_input.py](cad_to_input.py) | core (CLI) | Standardized-CAD intake CLI. Reads a `.dxf` *or* `.dwg` whose surface lives on `AI_PROJECT_BOUNDARY` (+ optional holes on `AI_HOLES_CUTOUTS`), converts a DWG to DXF if needed, validates the geometry, and writes an engine-input JSON via `build_project_input_dict`. Supports `--include-test-slabs`, `--test-slab-*`, `--strategy …`, `--oda-path`, `--conversion-backend`. |
+| [inspect_cad.py](inspect_cad.py) | core (CLI) | CAD inspection CLI. Accepts `.dxf` or `.dwg` (DWG converted first); reports layers, entity counts, boundary area / bbox, hole areas, and conversion provenance as Markdown. Exits non-zero when the inspection found errors so it composes with shell pipelines. |
+| [make_package.py](make_package.py) | core (CLI) | One-shot orchestrator: standardized `.dwg`/`.dxf` → conversion → engine input JSON → placement engine → CAD hand-off package. Thin glue over `build_project_input_dict`, `engine.run`, and `write_package`; adds no engine behaviour. |
 
 ### `placement_engine/`
 
@@ -235,6 +249,14 @@ Categories used below:
 | [`dxf_exporter.py`](placement_engine/exporters/dxf_exporter.py) | helper | `_ensure_layers(doc)` · `_label_text_height(project_input)` · `_piece_centroid(piece)` · `write_dxf(project_input, layout_option, target)` | Writes a clean editable DXF for one layout option using `ezdxf`. Layers: `PROJECT_BOUNDARY`, `HOLES_CUTOUTS`, `SLAB_PIECES`, `OFFCUT_PIECES`, `SEAMS`, `PIECE_LABELS`, `REVIEW_REFERENCE_POINTS`. Pieces become closed `LWPOLYLINE` entities; labels become `TEXT` entities at piece centroids; seams become `LINE` (2-vertex) or `LWPOLYLINE` (multi-vertex). Layout-level review markers (`location=None`) are intentionally **not** rendered — they live in the report. Text height is auto-scaled from the project bbox. Why DXF: Rhino and AutoCAD both ingest DXF cleanly without extra tooling, which is the existing designer workflow. |
 | [`markdown_report.py`](placement_engine/exporters/markdown_report.py) | helper | `_suggested_marker_action(...)` · `_suggested_risk_action(...)` · per-section builders · `write_report(project_input, output, option, target)` | Writes the verbose Markdown companion to the DXF. Sections: title, summary, metrics table, pieces table (bbox + centroid), seams table (endpoints), designer review notes (severity + location + related pieces + message + suggested action), per-piece risk flags, notes & limitations (draft-status disclaimers). Markers and flags carry **addresses** so the designer can locate them in Rhino/AutoCAD. |
 | [`package.py`](placement_engine/exporters/package.py) | helper | `_slug(name)` · `_trim_output_to_one_option(...)` · `write_package(project_input, output, target_dir, options=…, render_preview=…)` | Orchestrates the per-option hand-off bundle: writes `layout_<strategy>.{json,dxf,md}` plus an optional preview PNG into `target_dir`. The trimmed JSON ensures the file next to each DXF/report contains only that option, so designers can't confuse strategies. |
+
+### `placement_engine/cad_conversion/`
+
+| File | Category | Functions / classes | Role |
+|------|----------|---------------------|------|
+| [`errors.py`](placement_engine/cad_conversion/errors.py) | **core** | `CADConversionError` · `UnsupportedCADFormatError` · `ODANotFoundError` · `ConversionFailedError` | Exception family for the conversion layer. Messages are written to be actionable for designers (what to do in Rhino/AutoCAD) and developers. |
+| [`oda_converter.py`](placement_engine/cad_conversion/oda_converter.py) | **core** | `find_oda_executable(explicit_path)` · `build_oda_command(...)` · `convert_with_oda(dwg, output_dir, oda_path)` · `ODA_MISSING_MESSAGE` | ODA File Converter backend. Locates the executable (explicit path → env var → common locations → PATH), builds the folder-based ODA command, stages the DWG in a temp folder, runs the converter via `subprocess`, and verifies the output DXF appeared (ODA's exit codes are unreliable, so file presence is the success signal). |
+| [`converter.py`](placement_engine/cad_conversion/converter.py) | **core** | `ConversionResult` dataclass · `convert_cad_to_dxf(input, output_dir, backend, oda_path)` · `SUPPORTED_EXTENSIONS` | Front door. `.dxf` → passthrough (no disk writes); `.dwg` → ODA backend; anything else → `UnsupportedCADFormatError`. `backend` is `auto` / `oda` / `none` (`none` blocks DWG conversion — handy in tests). Returns a `ConversionResult` recording original path, DXF path, whether conversion happened, and the backend. |
 
 ### `placement_engine/cad_intake/`
 
@@ -288,9 +310,38 @@ All **placeholder** — empty package markers.
 | [`tests/test_markdown_report.py`](tests/test_markdown_report.py) | Markdown report contract: file written; project id, layout/inventory status, coverage and waste percentages all surface in the body; every section header is present; every piece has a row in the pieces table; layout-level markers carry the "no specific point" address; draft-status disclaimers present. |
 | [`tests/test_package_exporter.py`](tests/test_package_exporter.py) | Package orchestrator: one file set per option with the expected naming; preview PNG written when requested; per-option JSON contains only that option (so designers can't confuse strategies); `--strategy` filtering works; raises when no options chosen. |
 | [`tests/test_cad_intake.py`](tests/test_cad_intake.py) | Standardized DXF → engine input pipeline. Happy paths (basic rectangle, rectangle with hole, default rules/design requirements, strategy flag), error paths (missing layer, multiple boundaries, hole outside boundary, unclosed polyline, unsupported entity, self-intersecting boundary, missing file), inspection report (areas + bbox + holes + errors-without-raising), end-to-end test that standardized DXF flows through `engine.run` and `write_package` to produce a full hand-off bundle. |
+| [`tests/test_cad_conversion.py`](tests/test_cad_conversion.py) | DWG → DXF conversion wrapper. DXF passthrough; unsupported-extension and missing-file errors; DWG-without-converter actionable error; ODA command construction and `convert_with_oda` (subprocess mocked — no real ODA needed); `find_oda_executable` lookup precedence; DXF still works through intake + `inspect_cad_file`. One real end-to-end ODA test, skipped unless `ODA_FILE_CONVERTER_PATH` is set. |
 | [`tests/test_debug_plot.py`](tests/test_debug_plot.py) | Parametrised over both example inputs: `render_layout` writes a real PNG (magic bytes + size). |
 
 ---
+
+## DWG input — conversion wrapper, not a parser
+
+```
+   standardized DWG
+        │
+        ▼
+   placement_engine/cad_conversion/
+     convert_cad_to_dxf(input, output_dir, backend, oda_path)
+        • .dxf → ConversionResult(was_converted=False, backend="passthrough")
+        • .dwg → oda_converter.convert_with_oda(...)
+                   → ODA File Converter subprocess → temporary DXF
+                   → ConversionResult(was_converted=True, backend="oda")
+        │
+        ▼
+   existing standardized-DXF intake (cad_intake/)  ← unchanged
+        │
+        ▼
+   engine input JSON  →  placement engine  →  CAD package exporter
+```
+
+The key principle: **DWG support is a conversion wrapper, not native
+DWG parsing.** The engine never interprets DWG bytes. An external tool
+(ODA File Converter) produces a DXF, and everything downstream — the
+intake parser, the engine, the exporters — runs exactly as it does for
+a hand-exported DXF. The `source_file` block in the generated JSON
+records the original DWG path and the intermediate DXF path so the
+provenance is traceable.
 
 ## Standardized-DXF validation workflow
 

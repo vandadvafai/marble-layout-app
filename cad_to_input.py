@@ -1,11 +1,22 @@
-"""CLI: convert a standardized DXF into an engine input JSON file.
+"""CLI: convert a standardized CAD file into an engine input JSON file.
+
+Accepts either a `.dxf` (read directly) or a `.dwg` (converted to DXF
+internally via ODA File Converter before the same intake runs).
 
 Usage:
+    # DXF input
     python cad_to_input.py \\
         --cad examples/cad_inputs/basic_floor_standardized.dxf \\
         --out examples/generated/input_basic_floor_from_cad.json \\
-        --project-id cad_basic_floor_001 \\
-        --project-type floor
+        --project-id cad_basic_floor_001
+
+    # DWG input (needs ODA File Converter)
+    python cad_to_input.py \\
+        --cad path/to/standardized_project.dwg \\
+        --out examples/generated/input_from_dwg.json \\
+        --project-id cad_project_001 \\
+        --include-test-slabs \\
+        --oda-path "/path/to/ODAFileConverter"
 
 Optional flags:
     --include-test-slabs    attach a synthetic test slab inventory
@@ -16,6 +27,8 @@ Optional flags:
     --slab-buffer-factor    surplus factor for 'auto' count (default 1.25)
     --strategy <name>       add to options_requested (repeatable; defaults to "balanced")
     --random-seed <int>     seed for natural_random; defaults to 42
+    --oda-path <path>       ODA File Converter executable (for .dwg input)
+    --conversion-backend    auto (default) / oda / none
 
 The output JSON validates against `ProjectInput` only when
 --include-test-slabs is set; without slabs the JSON is a draft the
@@ -29,6 +42,7 @@ import json
 import sys
 from pathlib import Path
 
+from placement_engine.cad_conversion import CADConversionError
 from placement_engine.cad_intake import build_project_input_dict
 from placement_engine.cad_intake.dxf_reader import CADIntakeError
 from placement_engine.utils.test_inventory import SlabInventorySpec
@@ -43,7 +57,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         )
     )
     parser.add_argument("--cad", "-c", required=True, type=Path,
-                        help="Path to the standardized DXF file.")
+                        help="Path to the standardized .dxf or .dwg file.")
     parser.add_argument("--out", "-o", required=True, type=Path,
                         help="Path to write the generated JSON.")
     parser.add_argument("--project-id", required=True,
@@ -70,6 +84,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         ))
     parser.add_argument("--random-seed", type=int, default=42,
                         help="random_seed value for natural_random (default 42).")
+    parser.add_argument("--oda-path", default=None,
+                        help="Path to the ODA File Converter executable "
+                             "(only needed for .dwg input).")
+    parser.add_argument("--conversion-backend", default="auto",
+                        choices=["auto", "oda", "none"],
+                        help="DWG conversion backend (default: auto).")
     return parser.parse_args(argv)
 
 
@@ -109,7 +129,12 @@ def main(argv: list[str] | None = None) -> int:
             test_slab_spec=test_slab_spec,
             options_requested=args.strategy,
             random_seed=args.random_seed,
+            conversion_backend=args.conversion_backend,
+            oda_path=args.oda_path,
         )
+    except CADConversionError as exc:
+        print(f"CAD conversion error: {exc}", file=sys.stderr)
+        return 2
     except CADIntakeError as exc:
         print(f"CAD intake error: {exc}", file=sys.stderr)
         return 2
@@ -119,8 +144,12 @@ def main(argv: list[str] | None = None) -> int:
 
     slab_count = len(payload["slabs"])
     hole_count = len(payload["layout"]["holes"])
+    source = payload["layout"]["source_file"]
     print(f"Wrote {args.out}")
     print(f"  project_id: {payload['project_id']}")
+    print(f"  source: {source['type']}")
+    if source.get("converted_dxf_path"):
+        print(f"  converted DXF: {source['converted_dxf_path']}")
     print(f"  boundary vertices: {len(payload['layout']['boundary'])}")
     print(f"  holes: {hole_count}")
     print(f"  slabs: {slab_count}" + ("" if slab_count else "  ← fill these in before running the engine"))

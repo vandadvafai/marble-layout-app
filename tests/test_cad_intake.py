@@ -10,6 +10,7 @@ import ezdxf
 import pytest
 
 from placement_engine import engine
+from placement_engine.cad_conversion import CADConversionError
 from placement_engine.cad_intake import (
     CADIntakeError,
     build_project_input,
@@ -82,7 +83,7 @@ def test_basic_rectangle_converts(tmp_path):
         (0.0, 0.0), (6000.0, 0.0), (6000.0, 4000.0), (0.0, 4000.0),
     ]
     assert payload["layout"]["holes"] == []
-    assert payload["layout"]["source_file"]["type"] == "dxf"
+    assert payload["layout"]["source_file"]["type"] == "standardized_dxf"
     # Test inventory attached on request.
     assert len(payload["slabs"]) == 6
 
@@ -227,7 +228,9 @@ def test_self_intersecting_boundary_raises(tmp_path):
 
 
 def test_missing_file_raises_clear_error(tmp_path):
-    with pytest.raises(CADIntakeError, match="does not exist"):
+    # A missing file is now caught at the conversion layer (the first
+    # stage that touches the path), so the exception is CADConversionError.
+    with pytest.raises(CADConversionError, match="does not exist"):
         build_project_input_dict(
             tmp_path / "nope.dxf", project_id="cad_missing_001"
         )

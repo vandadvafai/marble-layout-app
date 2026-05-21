@@ -100,6 +100,73 @@ supported. The intake raises a clear error if it finds them on a
 required layer with a hint about how to convert (typically Rhino's
 `_Convert` or AutoCAD's `PEDIT`).
 
+## DWG input support
+
+DXF remains the engine's internal parsed format. **DWG input is
+supported by automatically converting the DWG to a temporary DXF**,
+then running the unchanged DXF intake. The engine never parses DWG
+bytes itself — an external converter does that.
+
+Requirements and rules:
+
+- The DWG must still be **standardized** by the designer: exactly one
+  closed polyline on `AI_PROJECT_BOUNDARY`, optional closed polylines
+  on `AI_HOLES_CUTOUTS`, millimetre scale.
+- Automatic DWG conversion needs **ODA File Converter** (a free tool
+  from the Open Design Alliance) installed.
+- If no converter is available, manual DXF export from Rhino/AutoCAD
+  remains the fallback — just pass the `.dxf` to `--cad`.
+
+### Configuring ODA File Converter
+
+The tool locates the converter in this order:
+
+1. `--oda-path /path/to/ODAFileConverter` CLI flag
+2. `ODA_FILE_CONVERTER_PATH` environment variable
+3. Common install locations (macOS `.app`, Windows `Program Files`)
+4. `ODAFileConverter` on `PATH`
+
+If a DWG is given and none of these resolve, the tool fails with an
+actionable message explaining how to install/configure ODA or export
+DXF manually.
+
+### Example commands
+
+```bash
+# DXF input (unchanged)
+python3 cad_to_input.py \
+    --cad examples/cad_inputs/demo/demo_rectangle_floor.dxf \
+    --out examples/generated/input_demo_rectangle.json \
+    --project-id demo_rectangle_001 --include-test-slabs
+
+# DWG input — converted internally to DXF first
+python3 cad_to_input.py \
+    --cad path/to/standardized_project.dwg \
+    --out examples/generated/input_from_dwg.json \
+    --project-id demo_project_dwg_001 --include-test-slabs \
+    --oda-path "/path/to/ODAFileConverter"
+
+# Inspect a DWG (converts, then inspects the resulting DXF)
+python3 inspect_cad.py \
+    --cad path/to/standardized_project.dwg \
+    --out outputs/cad_inspections/project_dwg_report.md \
+    --oda-path "/path/to/ODAFileConverter"
+
+# One-shot: DWG/DXF → engine input → layout → hand-off package
+python3 make_package.py \
+    --cad path/to/standardized_project.dwg \
+    --project-id project_001 \
+    --out outputs/layout_packages/project_001 \
+    --strategies balanced lowest_waste \
+    --include-test-slabs --test-slab-count auto \
+    --oda-path "/path/to/ODAFileConverter"
+```
+
+Converted DXFs are written to `outputs/intermediate_cad/<project-id>/`
+and kept for debugging (gitignored, never committed). The generated
+JSON's `source_file` records both the original DWG path and the
+converted DXF path.
+
 ### Generating demo CAD inputs
 
 For testing the standardized intake (and as a reference for designers

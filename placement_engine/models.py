@@ -27,14 +27,24 @@ PolygonCoords = list[Point]
 class SourceFile(BaseModel):
     """Pointer to whatever the layout was originally extracted from.
 
-    For MVP only `manual_json` is meaningful; DXF/SVG/PDF/image importers
-    will plug in later without changing this shape.
+    `standardized_dxf` and `standardized_dwg_converted_to_dxf` are the
+    values the CAD intake emits today. When the input was a DWG,
+    `path` is the original DWG and `converted_dxf_path` records the
+    intermediate DXF the DWG→DXF wrapper produced.
     """
 
-    type: Literal["manual_json", "dxf", "svg", "pdf", "image", "cad_export"] = (
-        "manual_json"
-    )
+    type: Literal[
+        "manual_json",
+        "dxf",
+        "svg",
+        "pdf",
+        "image",
+        "cad_export",
+        "standardized_dxf",
+        "standardized_dwg_converted_to_dxf",
+    ] = "manual_json"
     path: str | None = None
+    converted_dxf_path: str | None = None
     notes: str | None = None
 
 

@@ -22,6 +22,7 @@ from placement_engine.cad_intake.dxf_reader import (
     layer_summary,
     read_dxf,
 )
+from placement_engine.cad_conversion import convert_cad_to_dxf
 from placement_engine.cad_intake.geometry_extractor import (
     extract_closed_polylines,
 )
@@ -29,7 +30,10 @@ from placement_engine.cad_intake.geometry_extractor import (
 
 @dataclass
 class InspectionReport:
-    """Structured snapshot of what's in a standardized DXF."""
+    """Structured snapshot of what's in a standardized DXF.
+
+    `path` is the DXF actually inspected. When the input was a DWG, the
+    conversion fields record where it came from."""
 
     path: str
     layers: dict[str, dict[str, int]] = field(default_factory=dict)
@@ -40,6 +44,12 @@ class InspectionReport:
     hole_areas_mm2: list[float] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    # Source / conversion provenance. `original_path` differs from
+    # `path` only when a DWG was converted to a DXF before inspection.
+    original_path: str | None = None
+    original_format: str | None = None
+    converted_dxf_path: str | None = None
+    conversion_backend: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -52,6 +62,10 @@ class InspectionReport:
             "hole_areas_mm2": list(self.hole_areas_mm2),
             "warnings": list(self.warnings),
             "errors": list(self.errors),
+            "original_path": self.original_path,
+            "original_format": self.original_format,
+            "converted_dxf_path": self.converted_dxf_path,
+            "conversion_backend": self.conversion_backend,
         }
 
 
@@ -124,10 +138,67 @@ def inspect_dxf(cad_path: str | Path) -> InspectionReport:
     return report
 
 
+def inspect_cad_file(
+    cad_path: str | Path,
+    *,
+    conversion_backend: str = "auto",
+    oda_path: str | Path | None = None,
+    intermediate_dir: str | Path | None = None,
+) -> InspectionReport:
+    """Inspect any supported CAD file (`.dxf` or `.dwg`).
+
+    A DWG is converted to a temporary DXF first; the report records the
+    original file, its format, the converted DXF path, and the backend.
+    A DXF is inspected directly. Conversion errors are captured into the
+    report's `errors` list rather than raised, so the inspect CLI can
+    still produce a diagnostic report for a broken input.
+    """
+    from placement_engine.cad_conversion import CADConversionError
+
+    cad_path = Path(cad_path)
+    if intermediate_dir is None:
+        intermediate_dir = Path("outputs/intermediate_cad") / cad_path.stem
+
+    try:
+        conversion = convert_cad_to_dxf(
+            cad_path, intermediate_dir,
+            backend=conversion_backend, oda_path=oda_path,
+        )
+    except CADConversionError as exc:
+        report = InspectionReport(path=str(cad_path))
+        report.original_path = str(cad_path)
+        report.original_format = cad_path.suffix.lower()
+        report.errors.append(str(exc))
+        return report
+
+    report = inspect_dxf(conversion.dxf_path)
+    report.original_path = str(conversion.original_path)
+    report.original_format = conversion.original_format
+    report.conversion_backend = conversion.backend
+    if conversion.was_converted:
+        report.converted_dxf_path = str(conversion.dxf_path)
+    return report
+
+
 def format_report_markdown(report: InspectionReport) -> str:
     """Render an `InspectionReport` as a designer-readable Markdown doc."""
     lines: list[str] = []
     lines += [f"# CAD Intake Inspection — `{report.path}`", ""]
+
+    # Source / conversion provenance (only meaningful once set by
+    # `inspect_cad_file`; `inspect_dxf` on its own leaves these None).
+    if report.original_path is not None:
+        lines += ["## Source file", ""]
+        lines.append(f"- original file: `{report.original_path}`")
+        lines.append(f"- original format: `{report.original_format}`")
+        if report.converted_dxf_path is not None:
+            lines.append(
+                f"- converted DXF: `{report.converted_dxf_path}` "
+                f"(inspection performed after DWG → DXF conversion)"
+            )
+        if report.conversion_backend is not None:
+            lines.append(f"- conversion backend: `{report.conversion_backend}`")
+        lines.append("")
 
     lines += ["## Layers found", ""]
     if report.layers:

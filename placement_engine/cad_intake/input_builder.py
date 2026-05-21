@@ -27,6 +27,7 @@ from placement_engine.cad_intake.dxf_reader import (
 from placement_engine.cad_intake.geometry_extractor import (
     extract_closed_polylines,
 )
+from placement_engine.cad_conversion import ConversionResult, convert_cad_to_dxf
 from placement_engine.models import (
     PolygonCoords,
     ProjectInput,
@@ -34,6 +35,31 @@ from placement_engine.models import (
     StrategyName,
 )
 from placement_engine.utils.test_inventory import SlabInventorySpec
+
+# Default location for intermediate DXFs produced by DWG conversion.
+_INTERMEDIATE_ROOT = Path("outputs/intermediate_cad")
+
+
+def _build_source_file(conv: ConversionResult) -> SourceFile:
+    """Build the `source_file` metadata block from a conversion result."""
+    if conv.was_converted:
+        return SourceFile(
+            type="standardized_dwg_converted_to_dxf",
+            path=str(conv.original_path),
+            converted_dxf_path=str(conv.dxf_path),
+            notes=(
+                "Generated from standardized DWG after internal "
+                "DWG-to-DXF conversion."
+            ),
+        )
+    return SourceFile(
+        type="standardized_dxf",
+        path=str(conv.original_path),
+        notes=(
+            "Generated from standardized CAD layers "
+            "(AI_PROJECT_BOUNDARY + AI_HOLES_CUTOUTS)."
+        ),
+    )
 
 
 # A default test inventory matched roughly to typical 3,200 × 1,800 mm
@@ -186,23 +212,41 @@ def build_project_input_dict(
     test_slab_spec: SlabInventorySpec | None = None,
     options_requested: Sequence[StrategyName] | None = None,
     random_seed: int = 42,
+    conversion_backend: str = "auto",
+    oda_path: str | Path | None = None,
+    intermediate_dir: str | Path | None = None,
 ) -> dict[str, Any]:
-    """Read a standardized DXF and return a raw engine-input dict.
+    """Read a standardized CAD file and return a raw engine-input dict.
 
-    Returns the same shape as `ProjectInput.model_dump()` would: ready
-    to write to disk as JSON.
+    `cad_path` may be a `.dxf` (read directly) or a `.dwg` (converted to
+    DXF first via `convert_cad_to_dxf`). The result is the same shape as
+    `ProjectInput.model_dump()` would produce: ready to write as JSON.
+
+    DWG conversion parameters:
+      * `conversion_backend` — `auto` / `oda` / `none` (see cad_conversion)
+      * `oda_path` — explicit ODA File Converter path (overrides lookup)
+      * `intermediate_dir` — where a converted DXF is written; defaults
+        to `outputs/intermediate_cad/<project_id>/`
 
     Slab inventory resolution, in priority order:
-      1. `test_slab_spec` given → resolve it against the project usable
-         area (this is how the validation suite and the CLI's
-         `--test-slab-count` flag attach slabs).
+      1. `test_slab_spec` given → resolve it against the project usable area.
       2. `include_test_slabs=True` (and no spec) → the fixed legacy
          6 × 3 200 × 1 800 inventory.
       3. neither → `slabs` is empty; the designer fills it in.
     """
     cad_path = Path(cad_path)
-    doc = read_dxf(cad_path)
-    boundary, holes = _extract_boundary_and_holes(doc, cad_path)
+    if intermediate_dir is None:
+        intermediate_dir = _INTERMEDIATE_ROOT / project_id
+
+    # DWG → DXF (or DXF passthrough). Conversion is a no-op on disk for
+    # a .dxf input, so the intermediate folder is only created for DWGs.
+    conversion = convert_cad_to_dxf(
+        cad_path, intermediate_dir,
+        backend=conversion_backend, oda_path=oda_path,
+    )
+
+    doc = read_dxf(conversion.dxf_path)
+    boundary, holes = _extract_boundary_and_holes(doc, conversion.dxf_path)
 
     boundary_poly = _validate_boundary(boundary)
     _validate_holes(holes, boundary_poly)
@@ -220,11 +264,7 @@ def build_project_input_dict(
         "project_type": project_type,
         "units": "mm",
         "layout": {
-            "source_file": SourceFile(
-                type="dxf",
-                path=str(cad_path),
-                notes="Generated from standardized CAD layers (AI_PROJECT_BOUNDARY + AI_HOLES_CUTOUTS).",
-            ).model_dump(),
+            "source_file": _build_source_file(conversion).model_dump(),
             "boundary": boundary,
             "holes": holes,
             "zones": [],
@@ -244,6 +284,9 @@ def build_project_input(
     project_type: str = "floor",
     options_requested: Sequence[StrategyName] | None = None,
     random_seed: int = 42,
+    conversion_backend: str = "auto",
+    oda_path: str | Path | None = None,
+    intermediate_dir: str | Path | None = None,
 ) -> ProjectInput:
     """Same as `build_project_input_dict` with the default test slab
     inventory attached and the result validated through Pydantic, so
@@ -256,5 +299,8 @@ def build_project_input(
         include_test_slabs=True,
         options_requested=options_requested,
         random_seed=random_seed,
+        conversion_backend=conversion_backend,
+        oda_path=oda_path,
+        intermediate_dir=intermediate_dir,
     )
     return ProjectInput.model_validate(payload)

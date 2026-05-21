@@ -26,11 +26,17 @@ outputs/layout_packages/**
 outputs/demo_cad_previews/**
 outputs/validation_runs/**
 
+# Intermediate DWG → DXF conversion artifacts (never committed).
+outputs/intermediate_cad/**
+outputs/**/internal/*.dxf
+outputs/**/internal/*.dwg
+
 !outputs/.gitkeep
 !outputs/cad_inspections/.gitkeep
 !outputs/dxf_validation_runs/.gitkeep
 !outputs/layout_packages/.gitkeep
 !outputs/demo_cad_previews/.gitkeep
+!outputs/intermediate_cad/.gitkeep
 
 # Duplicate / debug check artifacts
 *_check.json
