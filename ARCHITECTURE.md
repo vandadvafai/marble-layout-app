@@ -206,7 +206,7 @@ Categories used below:
 | [export_package.py](export_package.py) | core (CLI) | CAD hand-off CLI. Reads a project input JSON and (optionally) an existing layout output JSON, then calls `write_package` to produce the per-option DXF + Markdown report + JSON + preview bundle. Supports `--strategy` to filter to one option and `--no-preview` to skip the PNG. |
 | [cad_to_input.py](cad_to_input.py) | core (CLI) | Standardized-CAD intake CLI. Reads a `.dxf` *or* `.dwg` whose surface lives on `AI_PROJECT_BOUNDARY` (+ optional holes on `AI_HOLES_CUTOUTS`), converts a DWG to DXF if needed, validates the geometry, and writes an engine-input JSON via `build_project_input_dict`. Supports `--include-test-slabs`, `--test-slab-*`, `--strategy …`, `--oda-path`, `--conversion-backend`. |
 | [inspect_cad.py](inspect_cad.py) | core (CLI) | CAD inspection CLI. Accepts `.dxf` or `.dwg` (DWG converted first); reports layers, entity counts, boundary area / bbox, hole areas, and conversion provenance as Markdown. Exits non-zero when the inspection found errors so it composes with shell pipelines. |
-| [make_package.py](make_package.py) | core (CLI) | One-shot orchestrator: standardized `.dwg`/`.dxf` → conversion → engine input JSON → placement engine → CAD hand-off package. Thin glue over `build_project_input_dict`, `engine.run`, and `write_package`; adds no engine behaviour. |
+| [make_package.py](make_package.py) | core (CLI) | **The recommended one-command MVP entry point.** Standardized `.dxf` (or `.dwg` if a converter is configured) → CAD inspection → engine input JSON → placement engine → per-strategy hand-off package. Writes `cad_inspection.md` + `generated_engine_input.json` at the package root and one `<strategy>/` subfolder per strategy (`layout.json` / `layout.dxf` / `layout_report.md` / `preview.png`); `--keep-intermediate` adds `internal/full_engine_output.json`, `--clean-output` wipes the folder first. Thin glue over `build_project_input_dict`, `inspect_cad_file`, `engine.run`, and the individual exporters; adds no engine behaviour. |
 
 ### `placement_engine/`
 
@@ -314,6 +314,28 @@ All **placeholder** — empty package markers.
 | [`tests/test_debug_plot.py`](tests/test_debug_plot.py) | Parametrised over both example inputs: `render_layout` writes a real PNG (magic bytes + size). |
 
 ---
+
+## One-command MVP pipeline
+
+```
+   standardized DXF  (designer-exported from Rhino/AutoCAD)
+        │
+        ▼
+   make_package.py
+        ├─ inspect_cad_file        → cad_inspection.md
+        ├─ build_project_input_dict → generated_engine_input.json
+        │     (CAD intake + synthetic test slab inventory)
+        ├─ engine.run               → layout options
+        └─ per strategy: write_dxf · write_report · render_layout
+                                    → <strategy>/layout.{json,dxf}, _report.md, preview.png
+        │
+        ▼
+   outputs/layout_packages/<project>/   → open in Rhino/AutoCAD
+```
+
+DXF is the recommended MVP input. The `.dwg` path (next section) is an
+optional convenience layered in front of the same pipeline — it is not
+required for the one-command workflow.
 
 ## DWG input — conversion wrapper, not a parser
 

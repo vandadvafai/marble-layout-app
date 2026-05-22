@@ -42,6 +42,73 @@ python3 -c "import json; opt = json.load(open('outputs/layout_simple.json'))['la
   [print(f\"  {s['seam_id']}  pieces={s['piece_ids']}  len={s['length']:.0f}\") for s in opt['seams']]"
 ```
 
+## One-command package workflow
+
+The recommended MVP workflow is a **single command**. The designer
+prepares a standardized DXF (see "Standardized CAD input workflow"
+below), then runs `make_package.py` — no need to chain the lower-level
+scripts by hand.
+
+### Designer workflow
+
+1. Open the customer DWG in Rhino/AutoCAD.
+2. Standardize the geometry:
+   - exactly one closed polyline on `AI_PROJECT_BOUNDARY`
+   - optional closed polylines on `AI_HOLES_CUTOUTS`
+   - millimetre units, closed polylines only
+3. Export / save as **DXF**.
+4. Run `make_package.py` on the DXF.
+5. Open the generated layout DXF in Rhino/AutoCAD; read the report.
+
+### Recommended command
+
+```bash
+python3 make_package.py \
+    --cad examples/cad_inputs/demo/demo_floor_with_column.dxf \
+    --project-id demo_floor_with_column_001 \
+    --project-type floor \
+    --out outputs/layout_packages/demo_floor_with_column \
+    --strategies balanced lowest_waste \
+    --include-test-slabs \
+    --test-slab-count auto
+```
+
+Useful optional flags: `--no-preview` (skip PNGs), `--keep-intermediate`
+(also write `internal/full_engine_output.json`), `--clean-output`
+(wipe the output folder first), `--test-slab-count 20` (explicit count),
+`--oda-path` (only if feeding a `.dwg` — see "DWG input support").
+
+### Output package layout
+
+```
+outputs/layout_packages/demo_floor_with_column/
+├── cad_inspection.md            what the CAD intake saw
+├── generated_engine_input.json  the engine input that was run
+├── internal/                    only with --keep-intermediate
+│   └── full_engine_output.json
+├── balanced/
+│   ├── layout.json              engine output (this strategy only)
+│   ├── layout.dxf               editable layout geometry for Rhino/AutoCAD
+│   ├── layout_report.md         metrics, seams, review notes, risk flags
+│   └── preview.png              matplotlib preview (unless --no-preview)
+└── lowest_waste/
+    └── … same four files …
+```
+
+The terminal summary prints, per strategy, the `layout_status`,
+`inventory_status`, coverage %, waste %, piece count, slabs used, and
+seam count, plus the report and DXF paths.
+
+> **DXF is the recommended MVP input.** `make_package.py` also accepts a
+> `.dwg` *if* an external converter is configured (see "DWG input
+> support"), but for the MVP just export DXF from Rhino/AutoCAD —
+> automatic DWG conversion is an optional convenience, not a
+> requirement.
+>
+> The lower-level scripts (`cad_to_input.py`, `run_engine.py`,
+> `export_package.py`, `inspect_cad.py`) remain available for
+> step-by-step debugging.
+
 ## Standardized CAD input workflow
 
 Designers typically receive customer plans as **DWG** files. The

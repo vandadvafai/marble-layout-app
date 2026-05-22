@@ -350,13 +350,35 @@ contract.
 
 ---
 
+## 10f. DWG conversion is optional, not required for the MVP (0.1.10)
+
+**MVP decision.** The recommended MVP workflow is **standardized DXF
+in, via the one-command `make_package.py`**. Automatic DWG → DXF
+conversion is an *optional convenience*: it is not on the happy path,
+and the workflow is never blocked on ODA File Converter being
+installed. If a `.dwg` is supplied and no converter is configured, the
+tool fails with a clear message telling the designer to export DXF
+from Rhino/AutoCAD instead — which is the expected MVP step anyway.
+The DWG wrapper code (#10e) remains in place and supported for teams
+that do configure a converter.
+
+**Also still future work:**
+
+- **Real slab database integration.** `make_package.py` needs a slab
+  inventory to run the engine; today that comes from synthetic
+  `generate_test_slabs` (`--include-test-slabs`). Synthetic slabs are
+  for *validation only* — real dimensions, IDs, image paths, and
+  defects will come from the company slab database later.
+
+---
+
 ## 10e. DWG support is a conversion wrapper (NEW in 0.1.9)
 
 **What happens now.**
 [`placement_engine/cad_conversion/`](placement_engine/cad_conversion/)
 adds `.dwg` input support by **converting the DWG to a temporary DXF**
 and then running the unchanged DXF intake. `cad_to_input.py`,
-`inspect_cad.py`, and the new `make_package.py` all accept `.dwg`.
+`inspect_cad.py`, and `make_package.py` all accept `.dwg`.
 
 **What is still not solved.**
 
