@@ -1,4 +1,4 @@
-ENGINE_VERSION = "0.1.10"
+ENGINE_VERSION = "0.1.11"
 
 # Geometry tolerances (millimetres). Shapely operations on float coordinates
 # can produce sliver artefacts; a small absolute tolerance lets us treat

@@ -5,3 +5,4 @@ typer>=0.9
 pytest>=7.0
 matplotlib>=3.7
 ezdxf>=1.0
+streamlit>=1.30

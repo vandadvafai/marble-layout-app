@@ -206,7 +206,14 @@ Categories used below:
 | [export_package.py](export_package.py) | core (CLI) | CAD hand-off CLI. Reads a project input JSON and (optionally) an existing layout output JSON, then calls `write_package` to produce the per-option DXF + Markdown report + JSON + preview bundle. Supports `--strategy` to filter to one option and `--no-preview` to skip the PNG. |
 | [cad_to_input.py](cad_to_input.py) | core (CLI) | Standardized-CAD intake CLI. Reads a `.dxf` *or* `.dwg` whose surface lives on `AI_PROJECT_BOUNDARY` (+ optional holes on `AI_HOLES_CUTOUTS`), converts a DWG to DXF if needed, validates the geometry, and writes an engine-input JSON via `build_project_input_dict`. Supports `--include-test-slabs`, `--test-slab-*`, `--strategy …`, `--oda-path`, `--conversion-backend`. |
 | [inspect_cad.py](inspect_cad.py) | core (CLI) | CAD inspection CLI. Accepts `.dxf` or `.dwg` (DWG converted first); reports layers, entity counts, boundary area / bbox, hole areas, and conversion provenance as Markdown. Exits non-zero when the inspection found errors so it composes with shell pipelines. |
-| [make_package.py](make_package.py) | core (CLI) | **The recommended one-command MVP entry point.** Standardized `.dxf` (or `.dwg` if a converter is configured) → CAD inspection → engine input JSON → placement engine → per-strategy hand-off package. Writes `cad_inspection.md` + `generated_engine_input.json` at the package root and one `<strategy>/` subfolder per strategy (`layout.json` / `layout.dxf` / `layout_report.md` / `preview.png`); `--keep-intermediate` adds `internal/full_engine_output.json`, `--clean-output` wipes the folder first. Thin glue over `build_project_input_dict`, `inspect_cad_file`, `engine.run`, and the individual exporters; adds no engine behaviour. |
+| [make_package.py](make_package.py) | core (CLI) | **The recommended one-command MVP entry point.** Standardized `.dxf` (or `.dwg` if a converter is configured) → CAD inspection → engine input JSON → placement engine → per-strategy hand-off package. Thin wrapper over `generate_layout_package`: parses args, calls it, prints the terminal summary. `--keep-intermediate` / `--clean-output` / `--no-preview` flags. |
+| [streamlit_app.py](streamlit_app.py) | core (UI) | Local Streamlit interface — upload a standardized DXF, run both strategies, preview/download results. Calls `generate_layout_package` (the same function `make_package.py` uses); contains no pipeline logic of its own. Not deployed, no auth, DXF input only. |
+
+### `placement_engine/ui/`
+
+| File | Category | Functions / classes | Role |
+|------|----------|---------------------|------|
+| [`app_helpers.py`](placement_engine/ui/app_helpers.py) | **core** | `PackageResult` dataclass · `generate_layout_package(...)` · `_write_strategy_package(...)` · `build_package_zip(root, zip_path)` · `headline_metrics(option)` · `split_review_markers(option)` | The single shared orchestration: `generate_layout_package` runs CAD intake → engine → per-strategy package and returns a `PackageResult`. Both `make_package.py` and `streamlit_app.py` call it, so the workflow has exactly one implementation. The remaining helpers are presentation aids the UI uses (zip the package, extract the 8 headline metrics, partition routine vs. designer-facing review markers). |
 
 ### `placement_engine/`
 
@@ -312,8 +319,33 @@ All **placeholder** — empty package markers.
 | [`tests/test_cad_intake.py`](tests/test_cad_intake.py) | Standardized DXF → engine input pipeline. Happy paths (basic rectangle, rectangle with hole, default rules/design requirements, strategy flag), error paths (missing layer, multiple boundaries, hole outside boundary, unclosed polyline, unsupported entity, self-intersecting boundary, missing file), inspection report (areas + bbox + holes + errors-without-raising), end-to-end test that standardized DXF flows through `engine.run` and `write_package` to produce a full hand-off bundle. |
 | [`tests/test_cad_conversion.py`](tests/test_cad_conversion.py) | DWG → DXF conversion wrapper. DXF passthrough; unsupported-extension and missing-file errors; DWG-without-converter actionable error; ODA command construction and `convert_with_oda` (subprocess mocked — no real ODA needed); `find_oda_executable` lookup precedence; DXF still works through intake + `inspect_cad_file`. One real end-to-end ODA test, skipped unless `ODA_FILE_CONVERTER_PATH` is set. |
 | [`tests/test_debug_plot.py`](tests/test_debug_plot.py) | Parametrised over both example inputs: `render_layout` writes a real PNG (magic bytes + size). |
+| [`tests/test_make_package.py`](tests/test_make_package.py) | `make_package.py` CLI end-to-end: per-strategy subfolders + root artifacts, `--no-preview` / `--keep-intermediate` / `--clean-output`, terminal summary content, and the four error paths (missing file, missing boundary, multiple boundaries, missing slab inventory). |
+| [`tests/test_ui_helpers.py`](tests/test_ui_helpers.py) | `generate_layout_package` orchestration: returns a `PackageResult`, writes root + per-strategy files, `clean_output` clears stale files, error paths (missing file, missing boundary, no slabs); `build_package_zip` contents + zip-exclusion; `headline_metrics` keys/values; `split_review_markers` partition; report Markdown is readable. |
+| [`tests/test_streamlit_app.py`](tests/test_streamlit_app.py) | Light Streamlit smoke test via `AppTest`: the app script runs with no exception and renders its title + Generate button. Skipped if `streamlit.testing` is unavailable. |
 
 ---
+
+## Local Streamlit UI layer
+
+```
+   designer in a browser
+        │
+        ▼
+   streamlit_app.py              ← local UI, not deployed
+        │  (upload DXF, project id/type, slab settings)
+        ▼
+   placement_engine/ui/app_helpers.generate_layout_package(...)
+        │  ← the SAME function make_package.py calls
+        ▼
+   CAD intake → placement engine → per-strategy package
+        │
+        ▼
+   outputs/ui_runs/latest/   →  previews, metrics, downloads, .zip
+```
+
+The UI never re-implements pipeline logic: both `streamlit_app.py` and
+`make_package.py` call `generate_layout_package`, the single
+orchestration entry point in `placement_engine/ui/app_helpers.py`.
 
 ## One-command MVP pipeline
 

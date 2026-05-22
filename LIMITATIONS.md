@@ -350,6 +350,31 @@ contract.
 
 ---
 
+## 10g. Local Streamlit UI — internal MVP only (NEW in 0.1.11)
+
+**What happens now.** `streamlit_app.py` provides a local browser UI
+over `generate_layout_package` (the same orchestration the
+`make_package.py` CLI uses). Upload a standardized DXF → run both
+strategies → preview, inspect, and download the results.
+
+**What is still not solved / out of scope.**
+
+- **Local/internal only.** The UI is not deployed and has no
+  authentication. `streamlit run streamlit_app.py` on a laptop only.
+- **DXF input only in the normal UI flow.** The uploader accepts
+  `.dxf`. DWG must be exported to DXF in Rhino/AutoCAD first; the DWG
+  converter is not wired into the UI path.
+- **Synthetic slabs only.** The UI uses the generated test inventory;
+  there is no real company slab database yet.
+- **No live CAD editing.** The UI previews and exports — Rhino/AutoCAD
+  remains the editing environment. The output DXF is an editable
+  review draft.
+- **Only the latest run is kept.** Each "Generate" wipes
+  `outputs/ui_runs/latest/`. There is no run history or comparison
+  across runs.
+
+---
+
 ## 10f. DWG conversion is optional, not required for the MVP (0.1.10)
 
 **MVP decision.** The recommended MVP workflow is **standardized DXF
