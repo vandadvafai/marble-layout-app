@@ -74,7 +74,10 @@ def test_make_package_writes_per_strategy_subfolders(tmp_path):
         assert (strat_dir / "layout.json").is_file()
         assert (strat_dir / "layout.dxf").is_file()
         assert (strat_dir / "layout_report.md").is_file()
+        assert (strat_dir / "layout_report.pdf").is_file()
         assert (strat_dir / "preview.png").is_file()
+        # PDF magic bytes — confirms reportlab actually wrote a PDF.
+        assert (strat_dir / "layout_report.pdf").read_bytes().startswith(b"%PDF-")
 
 
 def test_make_package_per_strategy_json_contains_only_that_option(tmp_path):

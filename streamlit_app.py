@@ -14,10 +14,37 @@ Not for deployment. No authentication. DXF input only.
 
 from __future__ import annotations
 
+import inspect
 import re
 from pathlib import Path
 
 import streamlit as st
+
+
+# ---------------------------------------------------------------------------
+# Streamlit API compatibility shim
+# ---------------------------------------------------------------------------
+#
+# `st.image`'s "fill the column" knob has been renamed twice:
+#   * Streamlit 1.46+  → use_container_width=True
+#   * Streamlit ~1.10–1.45 → use_column_width="auto" / True
+#   * very old → neither — the image just renders at native width.
+#
+# We pick the right kwarg once at import so the call sites stay clean
+# and the app works on whichever version `pip install` resolved.
+
+_IMAGE_PARAMS = set(inspect.signature(st.image).parameters)
+if "use_container_width" in _IMAGE_PARAMS:
+    _FULL_WIDTH_IMAGE_KWARGS = {"use_container_width": True}
+elif "use_column_width" in _IMAGE_PARAMS:
+    _FULL_WIDTH_IMAGE_KWARGS = {"use_column_width": "auto"}
+else:  # pragma: no cover — very old Streamlit
+    _FULL_WIDTH_IMAGE_KWARGS = {}
+
+
+def render_full_width_image(path, caption: str | None = None) -> None:
+    """`st.image` at the column's full width, compatible across versions."""
+    st.image(str(path), caption=caption, **_FULL_WIDTH_IMAGE_KWARGS)
 
 from placement_engine.cad_conversion import CADConversionError
 from placement_engine.cad_intake.dxf_reader import CADIntakeError
@@ -98,8 +125,8 @@ def _render_strategy(result, strategy: str) -> None:
 
     # Preview image.
     if "preview" in files and files["preview"].is_file():
-        st.image(str(files["preview"]), caption=f"{strategy} layout preview",
-                 use_container_width=True)
+        render_full_width_image(files["preview"],
+                                caption=f"{strategy} layout preview")
 
     # Headline metrics.
     c1, c2, c3, c4 = st.columns(4)
@@ -137,26 +164,37 @@ def _render_strategy(result, strategy: str) -> None:
             for m in technical:
                 st.write(f"- `{m.type}`: {m.message}")
 
-    # Full report, collapsed.
-    with st.expander("View full designer report"):
+    # Primary download — PDF designer report.
+    if "pdf" in files and files["pdf"].is_file():
+        st.download_button(
+            "📄 Download PDF Report", files["pdf"].read_bytes(),
+            file_name=f"{strategy}_layout_report.pdf",
+            mime="application/pdf",
+            type="primary",
+            key=f"dl_pdf_{strategy}",
+        )
+
+    # Full Markdown report, collapsed (for on-screen preview only).
+    with st.expander("View report details"):
         st.markdown(files["report"].read_text())
 
-    # Downloads.
-    st.markdown("**Downloads**")
+    # Secondary downloads (DXF, JSON, preview, Markdown source).
+    st.markdown("**Other downloads**")
     d1, d2, d3, d4 = st.columns(4)
     d1.download_button("Editable DXF", files["dxf"].read_bytes(),
                        file_name=f"{strategy}_layout.dxf",
                        key=f"dl_dxf_{strategy}")
-    d2.download_button("Report (.md)", files["report"].read_text(),
-                       file_name=f"{strategy}_layout_report.md",
-                       key=f"dl_md_{strategy}")
-    d3.download_button("Layout JSON", files["json"].read_text(),
+    d2.download_button("Layout JSON", files["json"].read_text(),
                        file_name=f"{strategy}_layout.json",
                        key=f"dl_json_{strategy}")
     if "preview" in files and files["preview"].is_file():
-        d4.download_button("Preview PNG", files["preview"].read_bytes(),
+        d3.download_button("Preview PNG", files["preview"].read_bytes(),
                            file_name=f"{strategy}_preview.png",
                            key=f"dl_png_{strategy}")
+    d4.download_button("Report (Markdown)", files["report"].read_text(),
+                       file_name=f"{strategy}_layout_report.md",
+                       key=f"dl_md_{strategy}",
+                       help="Markdown source of the report (technical).")
 
 
 # ---------------------------------------------------------------------------

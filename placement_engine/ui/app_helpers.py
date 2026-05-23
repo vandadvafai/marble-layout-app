@@ -29,6 +29,7 @@ from placement_engine.cad_intake.inspection import (
 )
 from placement_engine.exporters.dxf_exporter import write_dxf
 from placement_engine.exporters.markdown_report import write_report
+from placement_engine.exporters.pdf_report import write_pdf_report
 from placement_engine.models import EngineOutput, LayoutOption, ProjectInput
 from placement_engine.utils.test_inventory import SlabInventorySpec
 from placement_engine.visualization.debug_plot import render_layout
@@ -102,10 +103,21 @@ def _write_strategy_package(
     )
 
     written = {"json": json_path, "dxf": dxf_path, "report": report_path}
+    # Preview must be rendered before the PDF report so the PDF can
+    # embed it.
+    preview_path: Path | None = None
     if render_preview:
         preview_path = strategy_dir / "preview.png"
         render_layout(project, output, preview_path, option_index=option_index)
         written["preview"] = preview_path
+
+    # PDF designer report — the primary download surfaced by the UI.
+    pdf_path = write_pdf_report(
+        project, output, option,
+        target=strategy_dir / "layout_report.pdf",
+        preview_path=preview_path,
+    )
+    written["pdf"] = pdf_path
     return written
 
 

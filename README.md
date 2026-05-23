@@ -67,8 +67,10 @@ The app opens in your browser (default `http://localhost:8501`).
    `lowest_waste` run automatically with a synthetic test slab
    inventory.
 4. Review per-strategy previews, headline metrics, warnings, and the
-   full report; download the editable DXF, report, JSON, preview, or
-   the complete `.zip` package.
+   full report; download the **PDF designer report** (primary), the
+   editable DXF, the layout JSON, the preview, or the complete `.zip`
+   package. The Markdown source of the report stays available as a
+   secondary technical download.
 
 ### Required CAD layers
 
@@ -130,10 +132,11 @@ outputs/layout_packages/demo_floor_with_column/
 ├── balanced/
 │   ├── layout.json              engine output (this strategy only)
 │   ├── layout.dxf               editable layout geometry for Rhino/AutoCAD
-│   ├── layout_report.md         metrics, seams, review notes, risk flags
+│   ├── layout_report.pdf        designer review report (primary)
+│   ├── layout_report.md         Markdown source of the report (technical)
 │   └── preview.png              matplotlib preview (unless --no-preview)
 └── lowest_waste/
-    └── … same four files …
+    └── … same five files …
 ```
 
 The terminal summary prints, per strategy, the `layout_status`,

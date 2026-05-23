@@ -350,6 +350,33 @@ contract.
 
 ---
 
+## 10h. PDF designer report — internal review draft only (NEW in 0.1.12)
+
+**What happens now.** Every layout package now includes
+`<strategy>/layout_report.pdf` alongside the Markdown source.
+ReportLab (Platypus) renders the PDF from structured layout data —
+title, status banner, metrics table, embedded preview image, designer
+review notes, risky pieces, piece schedule, notes & limitations.
+The PDF is the **primary download** surfaced in the Streamlit UI;
+the Markdown source remains available as a secondary technical
+download.
+
+**What is still not solved.**
+
+- **Internal review draft, not a branded customer document.** No
+  letterhead, no logo, no customer cover page, no signatures.
+- **Generated from synthetic test slabs** while the UI feeds the
+  engine via the synthetic inventory. Real slab IDs, dimensions, and
+  image paths from the company database will be reflected once the
+  database integration lands.
+- **No final factory production output.** The PDF is for designer
+  review; final factory cutting files / DWG approval drawings are
+  separate future deliverables.
+- **No customer-approval workflow.** Sign-off, revision history,
+  comments — all out of scope here.
+
+---
+
 ## 10g. Local Streamlit UI — internal MVP only (NEW in 0.1.11)
 
 **What happens now.** `streamlit_app.py` provides a local browser UI

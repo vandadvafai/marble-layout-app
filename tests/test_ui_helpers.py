@@ -49,8 +49,10 @@ def test_generate_writes_root_and_strategy_files(package):
     assert package.generated_input_path.is_file()
     for strategy in ("balanced", "lowest_waste"):
         files = package.per_strategy_files[strategy]
-        for kind in ("json", "dxf", "report", "preview"):
+        for kind in ("json", "dxf", "report", "preview", "pdf"):
             assert files[kind].is_file(), f"{strategy}/{kind} missing"
+        # PDF is a real PDF (magic bytes + non-empty).
+        assert files["pdf"].read_bytes().startswith(b"%PDF-")
 
 
 def test_generate_without_preview_skips_png(tmp_path):
@@ -117,6 +119,7 @@ def test_zip_contains_expected_files(package):
         assert f"{strategy}/layout.json" in names
         assert f"{strategy}/layout.dxf" in names
         assert f"{strategy}/layout_report.md" in names
+        assert f"{strategy}/layout_report.pdf" in names
         assert f"{strategy}/preview.png" in names
 
 
