@@ -11,8 +11,7 @@ command to get a complete layout package.
         → per-strategy hand-off package (DXF + report + JSON + preview)
 
 DWG input is also accepted *if* an external converter is configured
-(see --oda-path), but DXF is the recommended MVP input — if no
-converter is available, export DXF from Rhino/AutoCAD manually.
+(see --oda-path), but DXF is the recommended MVP input.
 
 Output layout (one folder per run):
 
@@ -20,7 +19,7 @@ Output layout (one folder per run):
       cad_inspection.md            what the intake saw
       generated_engine_input.json  the engine input that was run
       internal/                    (only with --keep-intermediate)
-        full_engine_output.json    raw multi-option engine output
+        full_engine_output.json
       <strategy>/                  one per requested strategy
         layout.json
         layout.dxf
@@ -36,32 +35,19 @@ Usage:
         --strategies balanced lowest_waste \\
         --include-test-slabs --test-slab-count auto
 
-This is thin orchestration over existing pieces — it adds no engine
-behaviour. The lower-level scripts (cad_to_input.py, run_engine.py,
-export_package.py, inspect_cad.py) remain available for debugging.
+This CLI is a thin wrapper over `generate_layout_package` — the same
+orchestration function the local Streamlit UI uses.
 """
 
 from __future__ import annotations
 
 import argparse
-import json
-import shutil
 import sys
 from pathlib import Path
 
-from placement_engine import engine
 from placement_engine.cad_conversion import CADConversionError
-from placement_engine.cad_intake import build_project_input_dict
 from placement_engine.cad_intake.dxf_reader import CADIntakeError
-from placement_engine.cad_intake.inspection import (
-    format_report_markdown,
-    inspect_cad_file,
-)
-from placement_engine.exporters.dxf_exporter import write_dxf
-from placement_engine.exporters.markdown_report import write_report
-from placement_engine.models import EngineOutput, LayoutOption, ProjectInput
-from placement_engine.utils.test_inventory import SlabInventorySpec
-from placement_engine.visualization.debug_plot import render_layout
+from placement_engine.ui.app_helpers import PackageResult, generate_layout_package
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -120,73 +106,32 @@ def _slab_count(raw: str) -> int | str:
     return n
 
 
-def _slug(name: str) -> str:
-    """Filesystem-safe slug for a strategy subfolder name."""
-    return "".join(c if c.isalnum() else "_" for c in name).strip("_").lower()
-
-
-def _write_strategy_package(
-    project: ProjectInput,
-    output: EngineOutput,
-    option: LayoutOption,
-    option_index: int,
-    strategy_dir: Path,
-    render_preview: bool,
-) -> dict[str, Path]:
-    """Write one strategy's layout.json / layout.dxf / layout_report.md
-    (+ preview.png) into `strategy_dir`. Returns the written paths."""
-    strategy_dir.mkdir(parents=True, exist_ok=True)
-
-    # layout.json — the engine output trimmed to just this option.
-    single = output.model_copy(update={"layout_options": [option]})
-    json_path = strategy_dir / "layout.json"
-    json_path.write_text(json.dumps(single.to_json_dict(), indent=2))
-
-    dxf_path = write_dxf(project, option, strategy_dir / "layout.dxf")
-    report_path = write_report(
-        project, output, option, strategy_dir / "layout_report.md"
-    )
-
-    written = {"json": json_path, "dxf": dxf_path, "report": report_path}
-    if render_preview:
-        preview_path = strategy_dir / "preview.png"
-        render_layout(project, output, preview_path, option_index=option_index)
-        written["preview"] = preview_path
-    return written
-
-
-def _print_summary(
-    args: argparse.Namespace,
-    payload: dict,
-    output: EngineOutput,
-    per_strategy_files: dict[str, dict[str, Path]],
-) -> None:
+def _print_summary(args: argparse.Namespace, result: PackageResult) -> None:
     """Print the clean terminal summary described in the milestone spec."""
-    layout = payload["layout"]
+    layout = result.payload["layout"]
     holes = layout["holes"]
-    # project_usable_area is identical across options; read it off the first.
-    usable_area = output.layout_options[0].metrics.project_usable_area
+    usable_area = result.engine_output.layout_options[0].metrics.project_usable_area
 
     print()
     print("Package created:")
-    print(f"  {args.out}/")
+    print(f"  {result.output_dir}/")
     print()
     print("Input:")
     print(f"  - CAD file: {args.cad}")
-    print(f"  - Project ID: {payload['project_id']}")
-    print(f"  - Project type: {payload['project_type']}")
+    print(f"  - Project ID: {result.project_id}")
+    print(f"  - Project type: {result.project_type}")
     print(f"  - Source: {layout['source_file']['type']}")
     print()
     print("CAD intake:")
     print(f"  - boundary found: yes ({len(layout['boundary'])} vertices)")
     print(f"  - holes found: {len(holes)}")
     print(f"  - project usable area: {usable_area:.0f} mm²")
-    print(f"  - slabs generated: {len(payload['slabs'])}")
+    print(f"  - slabs generated: {len(result.payload['slabs'])}")
     print()
     print("Strategies:")
-    for i, option in enumerate(output.layout_options, start=1):
+    for i, option in enumerate(result.engine_output.layout_options, start=1):
         m = option.metrics
-        files = per_strategy_files[option.strategy]
+        files = result.per_strategy_files[option.strategy]
         print(f"  {i}. {option.strategy}")
         print(f"     - layout_status: {m.layout_status}")
         print(f"     - inventory_status: {m.inventory_status}")
@@ -202,11 +147,9 @@ def _print_summary(
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
 
-    # Clear, actionable error for a missing CAD file.
     if not args.cad.is_file():
         print(f"CAD file not found: {args.cad}", file=sys.stderr)
         return 2
-
     if not args.include_test_slabs:
         print(
             "No slab inventory was provided. Use --include-test-slabs for "
@@ -217,22 +160,22 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
-    slab_spec = SlabInventorySpec(
-        count=_slab_count(args.test_slab_count),
-        width=args.test_slab_width,
-        height=args.test_slab_height,
-        thickness=args.test_slab_thickness,
-        buffer_factor=args.slab_buffer_factor,
-    )
-
-    # 1. Convert (if .dwg) + build the engine input JSON.
     try:
-        payload = build_project_input_dict(
+        result = generate_layout_package(
             args.cad,
             project_id=args.project_id,
+            output_dir=args.out,
             project_type=args.project_type,
-            test_slab_spec=slab_spec,
-            options_requested=args.strategies,
+            strategies=args.strategies,
+            include_test_slabs=True,
+            test_slab_count=_slab_count(args.test_slab_count),
+            test_slab_width=args.test_slab_width,
+            test_slab_height=args.test_slab_height,
+            test_slab_thickness=args.test_slab_thickness,
+            slab_buffer_factor=args.slab_buffer_factor,
+            generate_preview=args.preview,
+            clean_output=args.clean_output,
+            keep_intermediate=args.keep_intermediate,
             conversion_backend=args.conversion_backend,
             oda_path=args.oda_path,
         )
@@ -243,51 +186,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"CAD intake error: {exc}", file=sys.stderr)
         return 2
 
-    # Prepare the output folder.
-    if args.clean_output and args.out.exists():
-        shutil.rmtree(args.out)
-    args.out.mkdir(parents=True, exist_ok=True)
-
-    # 2. CAD inspection report (never raises for content reasons).
-    inspection = inspect_cad_file(
-        args.cad,
-        conversion_backend=args.conversion_backend,
-        oda_path=args.oda_path,
-    )
-    (args.out / "cad_inspection.md").write_text(
-        format_report_markdown(inspection)
-    )
-
-    # 3. Persist the generated engine input next to the package.
-    (args.out / "generated_engine_input.json").write_text(
-        json.dumps(payload, indent=2)
-    )
-
-    # 4. Validate + 5. run the placement engine.
-    project = ProjectInput.model_validate(payload)
-    output = engine.run(project)
-
-    if args.keep_intermediate:
-        internal = args.out / "internal"
-        internal.mkdir(parents=True, exist_ok=True)
-        (internal / "full_engine_output.json").write_text(
-            json.dumps(output.to_json_dict(), indent=2)
-        )
-
-    # 6. Per-strategy hand-off packages in <out>/<strategy>/.
-    per_strategy_files: dict[str, dict[str, Path]] = {}
-    for index, option in enumerate(output.layout_options):
-        per_strategy_files[option.strategy] = _write_strategy_package(
-            project=project,
-            output=output,
-            option=option,
-            option_index=index,
-            strategy_dir=args.out / _slug(option.strategy),
-            render_preview=args.preview,
-        )
-
-    # 7. Terminal summary.
-    _print_summary(args, payload, output, per_strategy_files)
+    _print_summary(args, result)
     return 0
 
 

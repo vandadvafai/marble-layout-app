@@ -31,12 +31,16 @@ outputs/intermediate_cad/**
 outputs/**/internal/*.dxf
 outputs/**/internal/*.dwg
 
+# Local Streamlit UI runs (only the latest run is kept on disk).
+outputs/ui_runs/**
+
 !outputs/.gitkeep
 !outputs/cad_inspections/.gitkeep
 !outputs/dxf_validation_runs/.gitkeep
 !outputs/layout_packages/.gitkeep
 !outputs/demo_cad_previews/.gitkeep
 !outputs/intermediate_cad/.gitkeep
+!outputs/ui_runs/.gitkeep
 
 # Duplicate / debug check artifacts
 *_check.json

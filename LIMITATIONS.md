@@ -350,6 +350,58 @@ contract.
 
 ---
 
+## 10h. PDF designer report — internal review draft only (NEW in 0.1.12)
+
+**What happens now.** Every layout package now includes
+`<strategy>/layout_report.pdf` alongside the Markdown source.
+ReportLab (Platypus) renders the PDF from structured layout data —
+title, status banner, metrics table, embedded preview image, designer
+review notes, risky pieces, piece schedule, notes & limitations.
+The PDF is the **primary download** surfaced in the Streamlit UI;
+the Markdown source remains available as a secondary technical
+download.
+
+**What is still not solved.**
+
+- **Internal review draft, not a branded customer document.** No
+  letterhead, no logo, no customer cover page, no signatures.
+- **Generated from synthetic test slabs** while the UI feeds the
+  engine via the synthetic inventory. Real slab IDs, dimensions, and
+  image paths from the company database will be reflected once the
+  database integration lands.
+- **No final factory production output.** The PDF is for designer
+  review; final factory cutting files / DWG approval drawings are
+  separate future deliverables.
+- **No customer-approval workflow.** Sign-off, revision history,
+  comments — all out of scope here.
+
+---
+
+## 10g. Local Streamlit UI — internal MVP only (NEW in 0.1.11)
+
+**What happens now.** `streamlit_app.py` provides a local browser UI
+over `generate_layout_package` (the same orchestration the
+`make_package.py` CLI uses). Upload a standardized DXF → run both
+strategies → preview, inspect, and download the results.
+
+**What is still not solved / out of scope.**
+
+- **Local/internal only.** The UI is not deployed and has no
+  authentication. `streamlit run streamlit_app.py` on a laptop only.
+- **DXF input only in the normal UI flow.** The uploader accepts
+  `.dxf`. DWG must be exported to DXF in Rhino/AutoCAD first; the DWG
+  converter is not wired into the UI path.
+- **Synthetic slabs only.** The UI uses the generated test inventory;
+  there is no real company slab database yet.
+- **No live CAD editing.** The UI previews and exports — Rhino/AutoCAD
+  remains the editing environment. The output DXF is an editable
+  review draft.
+- **Only the latest run is kept.** Each "Generate" wipes
+  `outputs/ui_runs/latest/`. There is no run history or comparison
+  across runs.
+
+---
+
 ## 10f. DWG conversion is optional, not required for the MVP (0.1.10)
 
 **MVP decision.** The recommended MVP workflow is **standardized DXF

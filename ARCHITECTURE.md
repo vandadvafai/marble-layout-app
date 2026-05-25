@@ -206,7 +206,14 @@ Categories used below:
 | [export_package.py](export_package.py) | core (CLI) | CAD hand-off CLI. Reads a project input JSON and (optionally) an existing layout output JSON, then calls `write_package` to produce the per-option DXF + Markdown report + JSON + preview bundle. Supports `--strategy` to filter to one option and `--no-preview` to skip the PNG. |
 | [cad_to_input.py](cad_to_input.py) | core (CLI) | Standardized-CAD intake CLI. Reads a `.dxf` *or* `.dwg` whose surface lives on `AI_PROJECT_BOUNDARY` (+ optional holes on `AI_HOLES_CUTOUTS`), converts a DWG to DXF if needed, validates the geometry, and writes an engine-input JSON via `build_project_input_dict`. Supports `--include-test-slabs`, `--test-slab-*`, `--strategy …`, `--oda-path`, `--conversion-backend`. |
 | [inspect_cad.py](inspect_cad.py) | core (CLI) | CAD inspection CLI. Accepts `.dxf` or `.dwg` (DWG converted first); reports layers, entity counts, boundary area / bbox, hole areas, and conversion provenance as Markdown. Exits non-zero when the inspection found errors so it composes with shell pipelines. |
-| [make_package.py](make_package.py) | core (CLI) | **The recommended one-command MVP entry point.** Standardized `.dxf` (or `.dwg` if a converter is configured) → CAD inspection → engine input JSON → placement engine → per-strategy hand-off package. Writes `cad_inspection.md` + `generated_engine_input.json` at the package root and one `<strategy>/` subfolder per strategy (`layout.json` / `layout.dxf` / `layout_report.md` / `preview.png`); `--keep-intermediate` adds `internal/full_engine_output.json`, `--clean-output` wipes the folder first. Thin glue over `build_project_input_dict`, `inspect_cad_file`, `engine.run`, and the individual exporters; adds no engine behaviour. |
+| [make_package.py](make_package.py) | core (CLI) | **The recommended one-command MVP entry point.** Standardized `.dxf` (or `.dwg` if a converter is configured) → CAD inspection → engine input JSON → placement engine → per-strategy hand-off package. Thin wrapper over `generate_layout_package`: parses args, calls it, prints the terminal summary. `--keep-intermediate` / `--clean-output` / `--no-preview` flags. |
+| [streamlit_app.py](streamlit_app.py) | core (UI) | Local Streamlit interface — upload a standardized DXF, run both strategies, preview/download results. Calls `generate_layout_package` (the same function `make_package.py` uses); contains no pipeline logic of its own. Not deployed, no auth, DXF input only. |
+
+### `placement_engine/ui/`
+
+| File | Category | Functions / classes | Role |
+|------|----------|---------------------|------|
+| [`app_helpers.py`](placement_engine/ui/app_helpers.py) | **core** | `PackageResult` dataclass · `generate_layout_package(...)` · `_write_strategy_package(...)` · `build_package_zip(root, zip_path)` · `headline_metrics(option)` · `split_review_markers(option)` | The single shared orchestration: `generate_layout_package` runs CAD intake → engine → per-strategy package and returns a `PackageResult`. Both `make_package.py` and `streamlit_app.py` call it, so the workflow has exactly one implementation. The remaining helpers are presentation aids the UI uses (zip the package, extract the 8 headline metrics, partition routine vs. designer-facing review markers). |
 
 ### `placement_engine/`
 
@@ -247,7 +254,9 @@ Categories used below:
 |------|----------|-----------|------|
 | [`json_exporter.py`](placement_engine/exporters/json_exporter.py) | helper | `write_output(output, path)` | Serialises an `EngineOutput` via `model_dump(mode="json")` and writes it pretty-printed to disk. Creates parent directories. |
 | [`dxf_exporter.py`](placement_engine/exporters/dxf_exporter.py) | helper | `_ensure_layers(doc)` · `_label_text_height(project_input)` · `_piece_centroid(piece)` · `write_dxf(project_input, layout_option, target)` | Writes a clean editable DXF for one layout option using `ezdxf`. Layers: `PROJECT_BOUNDARY`, `HOLES_CUTOUTS`, `SLAB_PIECES`, `OFFCUT_PIECES`, `SEAMS`, `PIECE_LABELS`, `REVIEW_REFERENCE_POINTS`. Pieces become closed `LWPOLYLINE` entities; labels become `TEXT` entities at piece centroids; seams become `LINE` (2-vertex) or `LWPOLYLINE` (multi-vertex). Layout-level review markers (`location=None`) are intentionally **not** rendered — they live in the report. Text height is auto-scaled from the project bbox. Why DXF: Rhino and AutoCAD both ingest DXF cleanly without extra tooling, which is the existing designer workflow. |
-| [`markdown_report.py`](placement_engine/exporters/markdown_report.py) | helper | `_suggested_marker_action(...)` · `_suggested_risk_action(...)` · per-section builders · `write_report(project_input, output, option, target)` | Writes the verbose Markdown companion to the DXF. Sections: title, summary, metrics table, pieces table (bbox + centroid), seams table (endpoints), designer review notes (severity + location + related pieces + message + suggested action), per-piece risk flags, notes & limitations (draft-status disclaimers). Markers and flags carry **addresses** so the designer can locate them in Rhino/AutoCAD. |
+| [`_report_common.py`](placement_engine/exporters/_report_common.py) | helper | `MARKER_ACTIONS` / `RISK_ACTIONS` dicts · `suggested_marker_action(...)` · `suggested_risk_action(...)` · `piece_bbox` · `piece_centroid` · `fmt_int_mm` · `seam_endpoints` · `NOTES_AND_LIMITATIONS` | Shared content + tiny formatters used by both report writers, so the suggested-action text and geometry helpers live in exactly one place. |
+| [`markdown_report.py`](placement_engine/exporters/markdown_report.py) | helper | per-section builders · `write_report(project_input, output, option, target)` | Writes the verbose Markdown companion to the DXF. Sections: title, summary, metrics table, pieces table (bbox + centroid), seams table (endpoints), designer review notes, per-piece risk flags, notes & limitations. Imports its action lookups and formatters from `_report_common`. |
+| [`pdf_report.py`](placement_engine/exporters/pdf_report.py) | helper | `_styles()` · `_status_banner_style(...)` · per-section builders · `_draw_page_number(...)` · `write_pdf_report(project_input, output, option, target, preview_path)` | **PDF designer review report** (primary UI/CLI download) via ReportLab Platypus. A4 portrait with: title block, coloured status banner, coverage/waste explainer, metrics table, embedded preview (if supplied), per-marker designer review notes, per-piece risky-piece blocks, piece-schedule table, notes & limitations. Generated from structured `LayoutOption` data — never by parsing Markdown. Page numbers via canvas hook; tables split across pages automatically. |
 | [`package.py`](placement_engine/exporters/package.py) | helper | `_slug(name)` · `_trim_output_to_one_option(...)` · `write_package(project_input, output, target_dir, options=…, render_preview=…)` | Orchestrates the per-option hand-off bundle: writes `layout_<strategy>.{json,dxf,md}` plus an optional preview PNG into `target_dir`. The trimmed JSON ensures the file next to each DXF/report contains only that option, so designers can't confuse strategies. |
 
 ### `placement_engine/cad_conversion/`
@@ -312,8 +321,34 @@ All **placeholder** — empty package markers.
 | [`tests/test_cad_intake.py`](tests/test_cad_intake.py) | Standardized DXF → engine input pipeline. Happy paths (basic rectangle, rectangle with hole, default rules/design requirements, strategy flag), error paths (missing layer, multiple boundaries, hole outside boundary, unclosed polyline, unsupported entity, self-intersecting boundary, missing file), inspection report (areas + bbox + holes + errors-without-raising), end-to-end test that standardized DXF flows through `engine.run` and `write_package` to produce a full hand-off bundle. |
 | [`tests/test_cad_conversion.py`](tests/test_cad_conversion.py) | DWG → DXF conversion wrapper. DXF passthrough; unsupported-extension and missing-file errors; DWG-without-converter actionable error; ODA command construction and `convert_with_oda` (subprocess mocked — no real ODA needed); `find_oda_executable` lookup precedence; DXF still works through intake + `inspect_cad_file`. One real end-to-end ODA test, skipped unless `ODA_FILE_CONVERTER_PATH` is set. |
 | [`tests/test_debug_plot.py`](tests/test_debug_plot.py) | Parametrised over both example inputs: `render_layout` writes a real PNG (magic bytes + size). |
+| [`tests/test_make_package.py`](tests/test_make_package.py) | `make_package.py` CLI end-to-end: per-strategy subfolders + root artifacts, `--no-preview` / `--keep-intermediate` / `--clean-output`, terminal summary content, and the four error paths (missing file, missing boundary, multiple boundaries, missing slab inventory). |
+| [`tests/test_ui_helpers.py`](tests/test_ui_helpers.py) | `generate_layout_package` orchestration: returns a `PackageResult`, writes root + per-strategy files, `clean_output` clears stale files, error paths (missing file, missing boundary, no slabs); `build_package_zip` contents + zip-exclusion; `headline_metrics` keys/values; `split_review_markers` partition; report Markdown is readable. |
+| [`tests/test_streamlit_app.py`](tests/test_streamlit_app.py) | Light Streamlit smoke test via `AppTest`: the app script runs with no exception and renders its title + Generate button. Skipped if `streamlit.testing` is unavailable. |
+| [`tests/test_pdf_report.py`](tests/test_pdf_report.py) | PDF report: real PDF bytes; contains project id / strategy / status / metric keywords; includes review-notes + piece-schedule + limitations headings; works with and without preview; works with and without review markers / risk flags; multi-page when content warrants. Text extracted via `pypdf`. |
 
 ---
+
+## Local Streamlit UI layer
+
+```
+   designer in a browser
+        │
+        ▼
+   streamlit_app.py              ← local UI, not deployed
+        │  (upload DXF, project id/type, slab settings)
+        ▼
+   placement_engine/ui/app_helpers.generate_layout_package(...)
+        │  ← the SAME function make_package.py calls
+        ▼
+   CAD intake → placement engine → per-strategy package
+        │
+        ▼
+   outputs/ui_runs/latest/   →  previews, metrics, downloads, .zip
+```
+
+The UI never re-implements pipeline logic: both `streamlit_app.py` and
+`make_package.py` call `generate_layout_package`, the single
+orchestration entry point in `placement_engine/ui/app_helpers.py`.
 
 ## One-command MVP pipeline
 

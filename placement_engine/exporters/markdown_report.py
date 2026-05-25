@@ -14,92 +14,19 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from shapely.geometry import Polygon
-
+from placement_engine.exporters._report_common import (
+    fmt_int_mm as _fmt_int_mm,
+    piece_bbox as _bbox,
+    piece_centroid as _centroid,
+    seam_endpoints as _seam_endpoints,
+    suggested_marker_action as _suggested_marker_action,
+    suggested_risk_action as _suggested_risk_action,
+)
 from placement_engine.models import (
     EngineOutput,
     LayoutOption,
-    PlacedPiece,
     ProjectInput,
-    ReviewMarker,
-    RiskFlag,
-    Seam,
 )
-
-
-# ---------------------------------------------------------------------------
-# Suggested actions per marker / risk type
-# ---------------------------------------------------------------------------
-
-_MARKER_ACTIONS = {
-    "incomplete_coverage": (
-        "Add more slabs to inventory or accept the partial coverage if "
-        "the uncovered area is acceptable for this project."
-    ),
-    "insufficient_inventory": (
-        "Increase slab inventory or reduce project scope. Re-run the "
-        "engine with the updated input."
-    ),
-    "empty_slab_placement_skipped": (
-        "No action required — the engine retried at the next cursor "
-        "position. The marker is informational."
-    ),
-    "piece_risk": (
-        "Review the flagged piece in Rhino/AutoCAD. Decide whether to "
-        "keep, replace, merge, or re-cut."
-    ),
-}
-
-_RISK_ACTIONS = {
-    "small_piece": "Confirm the piece is large enough to fabricate cleanly.",
-    "narrow_piece": "Confirm the strip is wide enough to handle and install safely.",
-    "short_piece": "Confirm the strip is tall enough to handle and install safely.",
-    "thin_aspect_ratio": (
-        "Confirm the piece can be cut without snapping along its long "
-        "axis; consider rotating or re-cutting."
-    ),
-    "irregular_piece": (
-        "Confirm the non-rectangular cut is feasible at the workshop. "
-        "Consider simplifying the geometry."
-    ),
-}
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-def _bbox(piece: PlacedPiece) -> tuple[float, float, float, float]:
-    return Polygon(piece.project_polygon).bounds
-
-
-def _centroid(piece: PlacedPiece) -> tuple[float, float]:
-    c = Polygon(piece.project_polygon).centroid
-    return float(c.x), float(c.y)
-
-
-def _fmt_int_mm(v: float) -> str:
-    """Show whole millimetres without a trailing zero where natural."""
-    return f"{v:.0f}"
-
-
-def _seam_endpoints(seam: Seam) -> tuple[tuple[float, float], tuple[float, float]]:
-    return tuple(seam.line[0]), tuple(seam.line[-1])
-
-
-def _suggested_marker_action(marker: ReviewMarker) -> str:
-    return _MARKER_ACTIONS.get(
-        marker.type,
-        "Designer review required.",
-    )
-
-
-def _suggested_risk_action(flag: RiskFlag) -> str:
-    return _RISK_ACTIONS.get(
-        flag.type,
-        "Designer review required.",
-    )
 
 
 # ---------------------------------------------------------------------------

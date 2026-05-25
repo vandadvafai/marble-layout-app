@@ -42,6 +42,49 @@ python3 -c "import json; opt = json.load(open('outputs/layout_simple.json'))['la
   [print(f\"  {s['seam_id']}  pieces={s['piece_ids']}  len={s['length']:.0f}\") for s in opt['seams']]"
 ```
 
+## Local Streamlit interface
+
+A local, internal-only Streamlit UI sits on top of the one-command
+workflow — upload a standardized DXF, click one button, preview and
+download the results. It is **not deployed**, has no authentication,
+and is for local testing only.
+
+### Install & run
+
+```bash
+python3 -m pip install -r requirements.txt   # installs streamlit
+streamlit run streamlit_app.py
+```
+
+The app opens in your browser (default `http://localhost:8501`).
+
+### What it does
+
+1. Upload a **standardized DXF** (`.dxf` only — DWG is not part of the
+   normal UI flow; export DXF from Rhino/AutoCAD first).
+2. Enter a project ID and pick a project type.
+3. Click **Generate Layout Package** — both `balanced` and
+   `lowest_waste` run automatically with a synthetic test slab
+   inventory.
+4. Review per-strategy previews, headline metrics, warnings, and the
+   full report; download the **PDF designer report** (primary), the
+   editable DXF, the layout JSON, the preview, or the complete `.zip`
+   package. The Markdown source of the report stays available as a
+   secondary technical download.
+
+### Required CAD layers
+
+Same standard as the rest of the tool: exactly one closed polyline on
+`AI_PROJECT_BOUNDARY`, optional closed polylines on `AI_HOLES_CUTOUTS`,
+millimetre units. Unsupported geometry must be cleaned in
+Rhino/AutoCAD first.
+
+The slab inventory is **synthetic test data**, not the real Avandad
+slab database. Outputs are AI-generated first drafts for designer
+review in Rhino/AutoCAD. Each run is written to
+`outputs/ui_runs/latest/` (only the latest run is kept; not
+version-controlled).
+
 ## One-command package workflow
 
 The recommended MVP workflow is a **single command**. The designer
@@ -89,10 +132,11 @@ outputs/layout_packages/demo_floor_with_column/
 ├── balanced/
 │   ├── layout.json              engine output (this strategy only)
 │   ├── layout.dxf               editable layout geometry for Rhino/AutoCAD
-│   ├── layout_report.md         metrics, seams, review notes, risk flags
+│   ├── layout_report.pdf        designer review report (primary)
+│   ├── layout_report.md         Markdown source of the report (technical)
 │   └── preview.png              matplotlib preview (unless --no-preview)
 └── lowest_waste/
-    └── … same four files …
+    └── … same five files …
 ```
 
 The terminal summary prints, per strategy, the `layout_status`,
