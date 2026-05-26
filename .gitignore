@@ -34,6 +34,15 @@ outputs/**/internal/*.dwg
 # Local Streamlit UI runs (only the latest run is kept on disk).
 outputs/ui_runs/**
 
+# V1 ERP slab ingestion outputs (regenerable from the Excel + images).
+outputs/slab_ingestion/**
+outputs/slab_ingestion_*/**
+
+# Local raw ERP fixtures (Excel exports + slab photos). Real customer
+# data; never committed. Use --excel / --images to point the V1 script
+# at wherever the files actually live.
+data/
+
 !outputs/.gitkeep
 !outputs/cad_inspections/.gitkeep
 !outputs/dxf_validation_runs/.gitkeep
@@ -41,6 +50,7 @@ outputs/ui_runs/**
 !outputs/demo_cad_previews/.gitkeep
 !outputs/intermediate_cad/.gitkeep
 !outputs/ui_runs/.gitkeep
+!outputs/slab_ingestion/.gitkeep
 
 # Duplicate / debug check artifacts
 *_check.json

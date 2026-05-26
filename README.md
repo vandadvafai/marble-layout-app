@@ -427,6 +427,113 @@ review draft, not a final factory cutting file.
 The `--plot` / `-p` flag is optional; without it no PNG is rendered and
 matplotlib is not imported.
 
+## V1 slab inventory ingestion (ERP Excel bridge)
+
+The placement engine consumes slabs as structured records. Until the
+real slab database lands, the design team works from the ERP's messy
+Excel export plus a separate folder of slab photos. A small bridge
+under `placement_engine/slab_intake/` cleans these into a per-slab
+CSV/JSON the engine can use.
+
+This is a **V1 temporary adapter**, not a permanent data model — it is
+expected to be replaced when the real slab database is integrated (see
+[ARCHITECTURE.md](ARCHITECTURE.md) §Slab database future work).
+
+### What it expects
+
+| Input | Notes |
+|---|---|
+| `--excel path/to/export.xlsx` | The ERP export. Persian column headers are supported via `placement_engine/slab_intake/column_map.py`. |
+| `--images path/to/folder/` | Folder of slab photos. Scanned **recursively**. Images are matched by **سریال کالا / serial_number** (e.g. `1731792-4731.jpg`). Supported extensions: `.jpg .jpeg .png .webp .bmp .tif .tiff`. |
+| `--sheet name` *(optional)* | Sheet to read. If omitted and the workbook has multiple sheets, the sheet with the most non-empty rows is chosen. |
+| `--output dir/` *(optional)* | Output directory. Default: `outputs/slab_ingestion/`. |
+
+### How to run it
+
+```bash
+python3 scripts/prepare_slab_data.py \
+    --excel  path/to/export.xlsx \
+    --images path/to/images_folder \
+    --output outputs/slab_ingestion
+```
+
+### What it produces
+
+| File | Purpose |
+|---|---|
+| `clean_slabs.csv` | Flat per-slab CSV (UTF-8 with BOM so Excel renders Persian columns correctly). One row per slab, warnings joined with `;`. |
+| `clean_slabs.json` | Same data plus mapping/warning metadata, structured. Easier to consume from Python or the engine. |
+| `ingestion_report.txt` | Human-readable summary: rows ingested, mapped/unmapped columns, image match rate, warning counts, per-row warning list. |
+
+### Dimension parsing (from `سریال کالا` / serial_number)
+
+In V1 the **dimension-encoded** field is `سریال کالا` (`serial_number`),
+**not** `کد کالا`. `item_code` is preserved as metadata only and is
+never used for dimension parsing.
+
+- `serial_number` is treated as a **string** (leading zeros preserved, original digit script kept).
+- Persian / Arabic-Indic digits are translated to ASCII before parsing.
+- Non-digit characters (`/`, `-`, letters, ...) are skipped — only digits drive the parse.
+- The first **3 digits** are read as `height_cm`, the next **3** as `width_cm`.
+- Any extra digits (thickness, post-slash codes, batch suffix, ...) are **ignored** for V1.
+- Both values are converted to millimetres (`height_mm = height_cm * 10`, etc.).
+- The Excel `مساحت (M2)` column is read into `area_m2` for cross-checking.
+
+Examples:
+
+| `serial_number` | `height_cm` | `width_cm` | `height_mm` | `width_mm` |
+|---|---|---|---|---|
+| `1731792-4731/AV2040643-05` | 173 | 179 | 1730 | 1790 |
+| `1202002` | 120 | 200 | 1200 | 2000 |
+| `۱۵۰۳۰۰۲` | 150 | 300 | 1500 | 3000 |
+
+### Image matching
+
+- Images are **never embedded in Excel**. They live in a separate folder.
+- The folder is indexed recursively by filename **stem** (filename without extension).
+- Each Excel row is matched by deriving candidate stems from `serial_number` (in order):
+  1. portion before the first `/` (e.g. `1731792-4731`)
+  2. that portion with `-` / `_` removed
+  3. digits-only of that portion
+  4. first **7** digits of the full serial (h + w + thickness)
+  5. first **6** digits (h + w)
+  6. slash-replaced variants (`_` / `-`) of the full serial
+- The original `سریال کالا` is preserved verbatim in `serial_number`. The stem that actually matched is recorded in `image_id`.
+- **Last-resort fallback:** if no serial-derived candidate matches, the matcher tries `item_code`. When that's what found the image, the row is flagged with `image_matched_via_item_code` so designers can verify it.
+- No image → the row is kept and `image_not_found` is added to its `warnings`.
+
+### Slab identity
+
+- `slab_id` — per-slab identifier. Equal to `serial_number`. Falls back to `item_code` only when no serial exists.
+- `serial_number` — the ERP slab serial (`سریال کالا`), preserved as-written.
+- `item_code` — the ERP product code (`کد کالا`), metadata only.
+- `image_id` — the stem actually used to find the photo; for matched rows this is the serial-derived candidate that succeeded.
+
+### Warning codes
+
+Warnings never block the export — every row always appears in the output. They surface in the report and in the `warnings` column.
+
+| Warning | Meaning |
+|---|---|
+| `missing_serial_number` | The row had no `سریال کالا` — cannot parse dimensions or match an image by serial. |
+| `invalid_serial_format` | `serial_number` had fewer than 6 digits. |
+| `could_not_parse_dimensions` | Dimensions could not be extracted (paired with `missing_serial_number` or `invalid_serial_format`). |
+| `missing_item_code` | The row had no `کد کالا`. Informational — `item_code` is metadata only. |
+| `missing_area_m2` | `مساحت (M2)` was blank or non-numeric. |
+| `image_not_found` | No image file found whose stem matches any serial-derived candidate (or the item_code fallback). |
+| `image_matched_via_item_code` | Image was found by `item_code` after every serial-derived candidate failed. Worth a manual check. |
+| `duplicate_slab_id` | Another row shares this `slab_id` (= `serial_number`) — both rows are flagged. This is the real per-slab integrity check. |
+| `suspicious_area_mismatch` | `(height_mm × width_mm) / 1 000 000` differs from the Excel `area_m2` by more than 5%. The row is kept; designers should review. |
+
+Note on `item_code`: multiple slabs in the same product batch legitimately share the ERP `item_code` (product/material code). Shared `item_code` is **not** a warning in V1.
+
+### Editing the column map
+
+The Persian → internal mapping lives in one place:
+`placement_engine/slab_intake/column_map.py`. To support a new ERP
+header spelling, add another `"persian header": "internal_name"` entry
+and re-run the script.
+
 ## Repository layout
 
 ```
@@ -437,6 +544,9 @@ marble-placement-engine/
 ├── LIMITATIONS.md               ← what we don't solve yet
 ├── requirements.txt
 ├── run_engine.py                ← CLI entry point
+│
+├── scripts/
+│   └── prepare_slab_data.py     ← V1 ERP Excel + images → clean CSV/JSON
 │
 ├── examples/
 │   ├── input_floor_simple.json     ← rectangular floor
@@ -468,8 +578,12 @@ marble-placement-engine/
 │   ├── visualization/
 │   │   └── debug_plot.py         ← matplotlib PNG (lazy-imported)
 │   │
-│   └── utils/
-│       └── ids.py                ← deterministic ID generator
+│   ├── utils/
+│   │   └── ids.py                ← deterministic ID generator
+│   │
+│   └── slab_intake/                 ← V1 ERP Excel bridge (temporary)
+│       ├── column_map.py            ← Persian → internal column names
+│       └── pipeline.py              ← Excel + images → clean CSV/JSON
 │
 └── tests/                        ← pytest suite (30 tests)
     ├── conftest.py

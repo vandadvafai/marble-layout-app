@@ -10,3 +10,7 @@ reportlab>=4.0
 # Used by tests/test_pdf_report.py to verify PDF content; not imported
 # by runtime code.
 pypdf>=5.0
+# V1 ERP slab ingestion bridge (placement_engine/slab_intake/) — reads
+# the messy Excel export and writes clean CSV/JSON for the engine.
+pandas>=2.0
+openpyxl>=3.1
