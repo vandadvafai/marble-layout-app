@@ -38,6 +38,12 @@ outputs/ui_runs/**
 outputs/slab_ingestion/**
 outputs/slab_ingestion_*/**
 
+# V1 inventory smoke-test outputs (regenerable from clean_slabs.json).
+outputs/smoke_placement/**
+
+# V1 image intake outputs (processed slab photos + metadata).
+outputs/image_intake/**
+
 # Local raw ERP fixtures (Excel exports + slab photos). Real customer
 # data; never committed. Use --excel / --images to point the V1 script
 # at wherever the files actually live.
@@ -51,6 +57,8 @@ data/
 !outputs/intermediate_cad/.gitkeep
 !outputs/ui_runs/.gitkeep
 !outputs/slab_ingestion/.gitkeep
+!outputs/smoke_placement/.gitkeep
+!outputs/image_intake/.gitkeep
 
 # Duplicate / debug check artifacts
 *_check.json

@@ -14,3 +14,7 @@ pypdf>=5.0
 # the messy Excel export and writes clean CSV/JSON for the engine.
 pandas>=2.0
 openpyxl>=3.1
+# V1 image intake (placement_engine/image_intake/) — detects the green
+# usable-area rectangle in slab photos and crops it. opencv-python is
+# the headless-friendly binary distribution.
+opencv-python>=4.8
