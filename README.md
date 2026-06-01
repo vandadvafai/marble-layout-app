@@ -491,23 +491,36 @@ Examples:
 
 - Images are **never embedded in Excel**. They live in a separate folder.
 - The folder is indexed recursively by filename **stem** (filename without extension).
-- Each Excel row is matched by deriving candidate stems from `serial_number` (in order):
-  1. portion before the first `/` (e.g. `1731792-4731`)
-  2. that portion with `-` / `_` removed
-  3. digits-only of that portion
-  4. first **7** digits of the full serial (h + w + thickness)
-  5. first **6** digits (h + w)
-  6. slash-replaced variants (`_` / `-`) of the full serial
-- The original `سریال کالا` is preserved verbatim in `serial_number`. The stem that actually matched is recorded in `image_id`.
-- **Last-resort fallback:** if no serial-derived candidate matches, the matcher tries `item_code`. When that's what found the image, the row is flagged with `image_matched_via_item_code` so designers can verify it.
-- No image → the row is kept and `image_not_found` is added to its `warnings`.
+- Matching tries the primary slab-number method first; if that fails, the serial-fallback method runs. The method that succeeded is recorded in `image_match_method`.
+
+**Primary — `slab_number_suffix`** (Excel `شماره` ⇄ trailing numeric suffix of the filename):
+
+  - `شماره` (column `slab_number`) is parsed as an integer; leading zeros are tolerated (`"05"` → `5`).
+  - Each image stem's trailing digit run is parsed the same way (`5538-6545-27.jpeg` → `27`; `1781722-4731-04.jpg` → `4`).
+  - Equal integers match.
+  - When several images share a suffix, the matcher prefers one whose stem shares a ≥4-digit run with the serial — otherwise the alphabetically-first stem wins (stable across runs).
+
+**Fallback — `serial_fallback`** (only when slab_number matching produced nothing):
+
+  - Stems derived from `serial_number`, in order:
+    1. portion before the first `/` (e.g. `1731792-4731`)
+    2. that portion with `/AV<digits>` segment stripped (e.g. `1781722-4731/AV2040643-04` → `1781722-4731-04`)
+    3. that portion with `-` / `_` removed
+    4. digits-only of that portion
+    5. first **7** digits of the full serial (h + w + thickness)
+    6. first **6** digits (h + w)
+    7. slash-replaced variants (`_` / `-`) of the full serial
+
+- `item_code` is **never** used for image matching (V1).
+- No image → the row is kept, `image_match_method` is `not_found`, and `image_not_found` is added to its `warnings`.
 
 ### Slab identity
 
 - `slab_id` — per-slab identifier. Equal to `serial_number`. Falls back to `item_code` only when no serial exists.
 - `serial_number` — the ERP slab serial (`سریال کالا`), preserved as-written.
+- `slab_number` — the per-rack slab index (`شماره`), preserved as-written. Primary image-matching key.
 - `item_code` — the ERP product code (`کد کالا`), metadata only.
-- `image_id` — the stem actually used to find the photo; for matched rows this is the serial-derived candidate that succeeded.
+- `image_id` — the stem actually used to find the photo (whichever method succeeded). For unmatched rows, set to a stable serial-derived label for diagnostics.
 
 ### Warning codes
 
@@ -515,13 +528,12 @@ Warnings never block the export — every row always appears in the output. They
 
 | Warning | Meaning |
 |---|---|
-| `missing_serial_number` | The row had no `سریال کالا` — cannot parse dimensions or match an image by serial. |
-| `invalid_serial_format` | `serial_number` had fewer than 6 digits. |
+| `missing_serial_number` | The row had no `سریال کالا` — cannot parse dimensions or run the serial-fallback image match. |
+| `invalid_serial_format` | `serial_number` had fewer than 6 digits in its leading chunk. |
 | `could_not_parse_dimensions` | Dimensions could not be extracted (paired with `missing_serial_number` or `invalid_serial_format`). |
 | `missing_item_code` | The row had no `کد کالا`. Informational — `item_code` is metadata only. |
 | `missing_area_m2` | `مساحت (M2)` was blank or non-numeric. |
-| `image_not_found` | No image file found whose stem matches any serial-derived candidate (or the item_code fallback). |
-| `image_matched_via_item_code` | Image was found by `item_code` after every serial-derived candidate failed. Worth a manual check. |
+| `image_not_found` | Neither the slab_number suffix nor the serial fallback found an image. |
 | `duplicate_slab_id` | Another row shares this `slab_id` (= `serial_number`) — both rows are flagged. This is the real per-slab integrity check. |
 | `suspicious_area_mismatch` | `(height_mm × width_mm) / 1 000 000` differs from the Excel `area_m2` by more than 5%. The row is kept; designers should review. |
 

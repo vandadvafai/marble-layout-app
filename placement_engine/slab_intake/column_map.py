@@ -8,12 +8,21 @@ name — the first match wins.
 V1 keeps the mapping minimal and engine-focused. Only the headers needed
 for the placement engine's V1 contract are mapped:
 
-    serial_number   سریال کالا — **dimension-encoded** field; also the
-                    primary image-matching key. First 3 digits = height_cm,
-                    next 3 = width_cm. Becomes `slab_id`.
+    height_cm_excel سریال طول (CM) — explicit height/length cell (cm).
+                    **Source of truth** for `height_cm` when present.
+    width_cm_excel  عرض (CM) — explicit width cell (cm). Source of
+                    truth for `width_cm` when present.
+    serial_number   سریال کالا — dimension-encoded fallback. First 3
+                    digits of the leading chunk = height_cm, next 3 =
+                    width_cm. Becomes `slab_id`. Used to cross-check the
+                    explicit Excel dimensions; warns when they disagree.
+                    Also the fallback image-matching key.
+    slab_number     شماره — per-rack slab index. **Primary image-matching
+                    key**: matched against the trailing numeric suffix
+                    of the image filename stem (e.g. ``...-27.jpeg`` ⇒
+                    slab_number 27).
     item_code       کد کالا — product/item code, kept as metadata only.
-                    NOT used for dimension parsing in V1. Used as a
-                    last-resort image fallback.
+                    NOT used for dimension parsing or image matching.
     area_m2         مساحت (M2) — area in m² as recorded by the ERP, used
                     to cross-check the parsed dimensions.
 
@@ -32,7 +41,12 @@ COLUMN_MAP: dict[str, str] = {
     "کد کالا": "item_code",
     "سریال کالا": "serial_number",
     "سریال": "serial_number",
+    "شماره": "slab_number",
     # --- geometry / area ---------------------------------------------
+    "طول (CM)": "height_cm_excel",
+    "طول": "height_cm_excel",
+    "عرض (CM)": "width_cm_excel",
+    "عرض": "width_cm_excel",
     "مساحت (M2)": "area_m2",
     "مساحت M2": "area_m2",
     "مساحت": "area_m2",

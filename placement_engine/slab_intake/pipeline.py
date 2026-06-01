@@ -19,24 +19,28 @@ Pipeline steps:
 
         - clean serial_number (the dimension-encoded field; whitespace
           and invisibles stripped, original digit script preserved)
-        - parse height_cm / width_cm from the first 6 digits of
-          serial_number (thickness and any extra digits ignored for V1)
+        - parse height_cm / width_cm from the first 6 digits of the
+          first chunk of serial_number (thickness ignored for V1)
         - convert to mm
-        - clean item_code (kept as metadata only — NOT used for
-          dimension parsing in V1)
+        - read slab_number (per-rack index from شماره); preserved
+          verbatim, used as the **primary** image-matching key
+        - clean item_code (metadata only — never drives geometry or
+          image matching)
         - read area_m2 from the Excel column
         - compute calculated_area_m2 = h_mm * w_mm / 1e6 and flag
           `suspicious_area_mismatch` if it differs from area_m2 by more
           than `AREA_MISMATCH_RELATIVE_TOLERANCE`
-        - generate normalized image-key candidates from serial_number
-          (head-before-slash, dash-stripped head, digits-only head,
-          first 7 / first 6 digits, slash-replaced variants) and walk
-          them in order against the image index; image_id is set to the
-          candidate that actually matched
-        - if no serial-derived candidate matches, fall back to item_code
-          as a last-resort image key (warning: `image_matched_via_item_code`)
+        - match the image in this order, recording `image_match_method`:
+            (a) **slab_number_suffix** — int(slab_number) vs the trailing
+                numeric suffix of every image stem; deterministic tie-break
+                when several images share the suffix
+            (b) **serial_fallback** — serial-derived candidate stems
+                (head-before-slash, AV-segment-stripped, dash-stripped
+                head, digits-only, first 7/6 digits, slash-replaced
+                variants)
+            (c) **not_found** — neither succeeded; `image_not_found`
+                warning added
         - pick slab_id: serial_number if available, else item_code
-        - attach any optional metadata columns
 
     5. Sweep the records again to flag `duplicate_slab_id`. Shared
        `item_code` values are NOT a warning — multiple slabs in the
@@ -76,6 +80,12 @@ IMAGE_EXTENSIONS: tuple[str, ...] = (
 # Tolerance for area-mismatch warning: |calc - excel| / max > 5%.
 AREA_MISMATCH_RELATIVE_TOLERANCE: float = 0.05
 
+# Absolute tolerance for the Excel-vs-serial dimension cross-check, in cm.
+# The serial parser produces whole-cm integers; the Excel explicit cell
+# may be slightly off due to rounding. Anything beyond 1 cm on either
+# height or width is considered a real discrepancy and warned.
+DIMENSION_MISMATCH_TOLERANCE_CM: float = 1.0
+
 # Persian + Arabic-Indic digits → ASCII. Used everywhere an ERP cell may
 # contain non-ASCII digits (item codes, area, etc.).
 _DIGIT_TRANSLATE = str.maketrans(
@@ -105,18 +115,27 @@ class SlabRecord:
     # Identity
     slab_id: str | None = None
     serial_number: str | None = None
+    slab_number: str | None = None
     item_code: str | None = None
     image_id: str | None = None
-    # Geometry (cm and mm forms, plus area)
-    height_cm: int | None = None
-    width_cm: int | None = None
-    height_mm: int | None = None
-    width_mm: int | None = None
+    # Geometry — canonical chosen values (cm and mm forms, plus area).
+    # `height_cm` / `width_cm` may be int (from the serial parser) or
+    # float (from explicit Excel cells with sub-cm precision).
+    height_cm: float | None = None
+    width_cm: float | None = None
+    height_mm: float | None = None
+    width_mm: float | None = None
     area_m2: float | None = None
     calculated_area_m2: float | None = None
+    # Which source produced the canonical dimensions:
+    #   "explicit_excel"  — طول (CM) + عرض (CM) cells were present
+    #   "serial_fallback" — parsed from سریال کالا
+    #   "none"            — neither source produced dimensions
+    dimension_source: str = "none"
     # Image
     image_path: str | None = None
     image_found: bool = False
+    image_match_method: str = "not_found"  # slab_number_suffix | serial_fallback | not_found
     # Source traceability
     source_excel_row: int | None = None
     # Warnings (free of duplicates, order preserved)
@@ -315,6 +334,76 @@ def _normalize_serial_for_image(serial: str) -> tuple[str, list[str]]:
 # ---------------------------------------------------------------------------
 
 
+def _coerce_cm_cell(value: Any) -> float | None:
+    """Coerce a طول/عرض cm cell to a float, or None if blank/unparseable.
+
+    Tolerates int, float, and string inputs. Persian / Arabic-Indic
+    digits are translated to ASCII. Commas are treated as decimal
+    separators ("159,5" → 159.5) since some ERP exports use them.
+    Non-positive values are dropped to None — a slab cannot have
+    zero/negative dimension.
+    """
+    if value is None:
+        return None
+    if isinstance(value, float):
+        if pd.isna(value):
+            return None
+        return value if value > 0 else None
+    if isinstance(value, int):
+        return float(value) if value > 0 else None
+    try:
+        s = _strip_invisible(str(value)).translate(_DIGIT_TRANSLATE).strip()
+        if not s:
+            return None
+        s = s.replace(",", ".")
+        v = float(s)
+    except (TypeError, ValueError):
+        return None
+    return v if v > 0 else None
+
+
+def _normalize_slab_number_cell(value: Any) -> str | None:
+    """Trim a شماره cell to a printable string.
+
+    Preserves leading zeros when the cell is a string ("05" → "05") but
+    avoids the ``5.0`` float artifact when pandas decides the column is
+    numeric. Persian digits are translated to ASCII so int parsing works
+    downstream.
+    """
+    if value is None:
+        return None
+    if isinstance(value, float):
+        if pd.isna(value):
+            return None
+        s = str(int(value)) if value.is_integer() else repr(value)
+    elif isinstance(value, int):
+        s = str(value)
+    else:
+        s = str(value)
+    s = _strip_invisible(s).translate(_DIGIT_TRANSLATE).strip()
+    return s or None
+
+
+def _build_suffix_index(image_index: dict[str, Path]) -> dict[int, list[Path]]:
+    """Index images by the integer value of their trailing numeric suffix.
+
+    e.g. ``5538-6545-2.jpeg`` → suffix ``2``, ``1731792-4731-05.jpg`` →
+    suffix ``5`` (leading zeros normalised away via ``int(...)``). Stems
+    without a trailing digit run are ignored. Multiple images may share
+    a suffix — the caller picks deterministically among them.
+    """
+    suffix_idx: dict[int, list[Path]] = {}
+    for stem, path in image_index.items():
+        match = re.search(r"(\d+)$", stem)
+        if not match:
+            continue
+        suffix_idx.setdefault(int(match.group(1)), []).append(path)
+    # Stable order for tie-breaking later.
+    for paths in suffix_idx.values():
+        paths.sort(key=lambda p: p.stem)
+    return suffix_idx
+
+
 def build_image_index(image_dir: Path) -> dict[str, Path]:
     """Index every image under ``image_dir`` by filename stem.
 
@@ -429,10 +518,69 @@ def _add_warning(warnings: list[str], code: str) -> None:
         warnings.append(code)
 
 
+def _choose_dimensions(
+    excel_h: float | None,
+    excel_w: float | None,
+    serial_h: int | None,
+    serial_w: int | None,
+) -> tuple[float | None, float | None, str]:
+    """Pick canonical (height_cm, width_cm) and report which source won.
+
+    Rule: if BOTH explicit Excel cells are populated, use them. Mixing
+    Excel-h with serial-w is intentionally disallowed — a row whose
+    Excel dimensions are half-populated is treated as needing the
+    serial in full.
+    """
+    if excel_h is not None and excel_w is not None:
+        return excel_h, excel_w, "explicit_excel"
+    if serial_h is not None and serial_w is not None:
+        return float(serial_h), float(serial_w), "serial_fallback"
+    return None, None, "none"
+
+
+def _cm_display(value: float) -> float | int:
+    """Render a cm value as an int when it's whole, else a float.
+
+    Keeps the canonical JSON / CSV output readable: serial-parsed values
+    stay as integers (``173``), Excel cells with sub-cm precision keep
+    their decimals (``159.5``).
+    """
+    return int(value) if value == int(value) else float(value)
+
+
+def _pick_suffix_candidate(
+    candidates: list[Path],
+    serial: str | None,
+) -> Path | None:
+    """Pick one image from a same-suffix candidate set.
+
+    When several images share a trailing numeric suffix (e.g. two
+    different racks both have a slab "5"), prefer one whose stem shares
+    a non-trivial digit run with the serial. Falls back to the
+    alphabetically-first stem so results are stable across runs.
+    """
+    if not candidates:
+        return None
+    if len(candidates) == 1 or not serial:
+        return candidates[0]
+    serial_digits = re.sub(r"\D", "", serial.translate(_DIGIT_TRANSLATE))
+    if not serial_digits:
+        return candidates[0]
+    # Score: count of length-≥4 digit runs in the stem that appear in
+    # the serial's digit string. Anything ≥ 4 digits avoids matching on
+    # tiny coincidental runs.
+    def score(path: Path) -> int:
+        runs = re.findall(r"\d{4,}", path.stem)
+        return sum(1 for r in runs if r in serial_digits)
+
+    return max(candidates, key=score)
+
+
 def _build_record(
     row: pd.Series,
     source_excel_row: int,
     image_index: dict[str, Path],
+    suffix_index: dict[int, list[Path]],
 ) -> SlabRecord:
     rec = SlabRecord(source_excel_row=source_excel_row)
     warnings: list[str] = []
@@ -442,9 +590,13 @@ def _build_record(
     serial_clean = _normalize_serial_cell(
         row.get("serial_number") if "serial_number" in row else None
     )
+    slab_number = _normalize_slab_number_cell(
+        row.get("slab_number") if "slab_number" in row else None
+    )
 
     rec.item_code = item_code
     rec.serial_number = serial_clean  # preserves the original serial string
+    rec.slab_number = slab_number
     # slab_id = normalized serial when available, else item_code as fallback.
     rec.slab_id = serial_clean or item_code
 
@@ -454,19 +606,48 @@ def _build_record(
         # item_code is metadata only, so this is informational.
         _add_warning(warnings, "missing_item_code")
 
-    # --- dimensions from serial_number --------------------------------
+    # --- dimensions: prefer Excel explicit, fall back to serial -------
+    #
+    # The serial parser is always exercised when a serial is present —
+    # both because it's the fallback when explicit cells are missing
+    # AND because it serves as a cross-check on the explicit values.
+    excel_h = _coerce_cm_cell(
+        row.get("height_cm_excel") if "height_cm_excel" in row else None
+    )
+    excel_w = _coerce_cm_cell(
+        row.get("width_cm_excel") if "width_cm_excel" in row else None
+    )
+    serial_h: int | None = None
+    serial_w: int | None = None
     if serial_clean:
-        h_cm, w_cm = parse_dimensions_from_serial(serial_clean)
-        if h_cm is None or w_cm is None:
+        serial_h, serial_w = parse_dimensions_from_serial(serial_clean)
+        if serial_h is None or serial_w is None:
             _add_warning(warnings, "invalid_serial_format")
-            _add_warning(warnings, "could_not_parse_dimensions")
-        else:
-            rec.height_cm = h_cm
-            rec.width_cm = w_cm
-            rec.height_mm = h_cm * 10
-            rec.width_mm = w_cm * 10
-    else:
+
+    chosen_h, chosen_w, source = _choose_dimensions(
+        excel_h, excel_w, serial_h, serial_w
+    )
+    if chosen_h is None or chosen_w is None:
         _add_warning(warnings, "could_not_parse_dimensions")
+    else:
+        rec.height_cm = _cm_display(chosen_h)
+        rec.width_cm = _cm_display(chosen_w)
+        rec.height_mm = chosen_h * 10
+        rec.width_mm = chosen_w * 10
+    rec.dimension_source = source
+
+    # Cross-check: if BOTH sources produced values, compare them.
+    if (
+        excel_h is not None
+        and excel_w is not None
+        and serial_h is not None
+        and serial_w is not None
+        and (
+            abs(excel_h - serial_h) > DIMENSION_MISMATCH_TOLERANCE_CM
+            or abs(excel_w - serial_w) > DIMENSION_MISMATCH_TOLERANCE_CM
+        )
+    ):
+        _add_warning(warnings, "dimension_mismatch_excel_vs_serial")
 
     # --- area ---------------------------------------------------------
     area_raw = row.get("area_m2") if "area_m2" in row else None
@@ -496,31 +677,39 @@ def _build_record(
             if rel > AREA_MISMATCH_RELATIVE_TOLERANCE:
                 _add_warning(warnings, "suspicious_area_mismatch")
 
-    # --- image match (serial-first, item_code as last resort) --------
+    # --- image match (slab_number suffix first, serial fallback) -----
     image_id: str | None = None
     matched_path: Path | None = None
+    method = "not_found"
 
-    if serial_clean:
+    # (a) Primary: شماره → trailing numeric suffix of the image stem.
+    if slab_number is not None:
+        try:
+            wanted = int(slab_number)
+        except ValueError:
+            wanted = None
+        if wanted is not None:
+            candidates = suffix_index.get(wanted, [])
+            chosen = _pick_suffix_candidate(candidates, serial_clean)
+            if chosen is not None:
+                matched_path = chosen
+                image_id = chosen.stem
+                method = "slab_number_suffix"
+
+    # (b) Fallback: serial-derived candidate stems.
+    if matched_path is None and serial_clean:
         primary, candidates = _normalize_serial_for_image(serial_clean)
-        image_id = primary
+        image_id = primary  # provisional, in case nothing matches
         for cand in candidates:
             hit = image_index.get(cand)
             if hit is not None:
                 matched_path = hit
-                # Record exactly which form matched, for downstream traceability.
                 image_id = cand
+                method = "serial_fallback"
                 break
 
-    # Last-resort fallback: if no serial-derived stem matched a file but
-    # we do have an item_code, try that. Flag it so designers can verify.
-    if matched_path is None and item_code:
-        hit = image_index.get(item_code)
-        if hit is not None:
-            matched_path = hit
-            image_id = item_code
-            _add_warning(warnings, "image_matched_via_item_code")
-
     rec.image_id = image_id
+    rec.image_match_method = method
     if matched_path is not None:
         rec.image_path = str(matched_path)
         rec.image_found = True
@@ -548,6 +737,7 @@ def ingest_slab_export(
         raise FileNotFoundError(f"Excel file not found: {excel_path}")
 
     image_index = build_image_index(image_dir)
+    suffix_index = _build_suffix_index(image_index)
     df, resolved_sheet = _load_excel(excel_path, sheet_name)
     df, mapped, unmapped = _rename_columns(df)
 
@@ -555,7 +745,7 @@ def ingest_slab_export(
     for i, row in df.iterrows():
         # Excel rows are 1-indexed and include the header — +2 lines up
         # with what a user sees when opening the file in Excel.
-        records.append(_build_record(row, int(i) + 2, image_index))
+        records.append(_build_record(row, int(i) + 2, image_index, suffix_index))
 
     # Cross-row duplicate detection — slab_id only.
     #
@@ -594,16 +784,19 @@ def ingest_slab_export(
 CSV_FIELDS: tuple[str, ...] = (
     "slab_id",
     "serial_number",
+    "slab_number",
     "item_code",
     "image_id",
     "height_cm",
     "width_cm",
     "height_mm",
     "width_mm",
+    "dimension_source",
     "area_m2",
     "calculated_area_m2",
     "image_path",
     "image_found",
+    "image_match_method",
     "source_excel_row",
     "warnings",
 )
