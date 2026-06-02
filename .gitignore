@@ -47,6 +47,9 @@ outputs/image_intake/**
 # V1 DXF smoke placement outputs (regenerable from DXF + inventory).
 outputs/dxf_smoke_placement/**
 
+# V1 polygon-aware DXF placement outputs (regenerable).
+outputs/dxf_polygon_placement/**
+
 # Local raw ERP fixtures (Excel exports + slab photos). Real customer
 # data; never committed. Use --excel / --images to point the V1 script
 # at wherever the files actually live.
@@ -63,6 +66,7 @@ data/
 !outputs/smoke_placement/.gitkeep
 !outputs/image_intake/.gitkeep
 !outputs/dxf_smoke_placement/.gitkeep
+!outputs/dxf_polygon_placement/.gitkeep
 
 # Duplicate / debug check artifacts
 *_check.json
