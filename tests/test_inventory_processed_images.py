@@ -14,6 +14,7 @@ from placement_engine.inventory import (
     load_inventory,
     load_processed_image_metadata,
 )
+from placement_engine.target_area import TargetArea
 
 
 # ---------------------------------------------------------------------------
@@ -296,7 +297,8 @@ def test_placement_carries_processed_image_path(tmp_path: Path):
     )
     inv = load_inventory(clean_slabs)
     attach_processed_images(inv, meta_path)
-    result = shelf_pack(inv.slabs, project_width_mm=4000, project_height_mm=3000)
+    target = TargetArea(target_id="t", name="t", width_mm=4000, height_mm=3000)
+    result = shelf_pack(inv.slabs, target)
     assert result.placements[0].processed_image_path == processed
 
 

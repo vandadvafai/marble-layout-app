@@ -4,7 +4,7 @@ This is intentionally NOT a real placement strategy. It exists to
 exercise the geometry pipeline end-to-end before any optimization
 work begins. It does no rotation, no seam scoring, no offcut reuse, no
 visual matching. Slabs are placed in the order they appear, one row at
-a time, wrapping when they hit the right edge.
+a time, wrapping when they hit the right edge of the target area.
 
 A real placement strategy lives under ``placement_engine.strategies``
 and consumes the engine's Pydantic `ProjectInput` — not these
@@ -18,13 +18,14 @@ from pathlib import Path
 from typing import Iterable
 
 from placement_engine.inventory.model import InventorySlab
+from placement_engine.target_area import TargetArea
 
 
 @dataclass
 class Placement:
-    """One placed slab in project-space coordinates (millimetres).
+    """One placed slab in target-area coordinates (millimetres).
 
-    The origin is the project's bottom-left corner. ``(x, y)`` is the
+    The origin is the target's bottom-left corner. ``(x, y)`` is the
     bottom-left corner of the placed rectangle. ``width_mm`` and
     ``height_mm`` keep the orientation the slab arrived in — V1 does
     not rotate.
@@ -46,12 +47,19 @@ class Placement:
 class ShelfPackResult:
     placements: list[Placement]
     overflow: list[InventorySlab]
-    project_width_mm: float
-    project_height_mm: float
+    target: TargetArea
 
     @property
-    def project_area_m2(self) -> float:
-        return self.project_width_mm * self.project_height_mm / 1_000_000.0
+    def target_width_mm(self) -> float:
+        return self.target.width_mm
+
+    @property
+    def target_height_mm(self) -> float:
+        return self.target.height_mm
+
+    @property
+    def target_area_m2(self) -> float:
+        return self.target.calculated_area_m2
 
     @property
     def placed_area_m2(self) -> float:
@@ -61,27 +69,28 @@ class ShelfPackResult:
 
     @property
     def uncovered_area_m2(self) -> float:
-        return max(self.project_area_m2 - self.placed_area_m2, 0.0)
+        return max(self.target_area_m2 - self.placed_area_m2, 0.0)
+
+    @property
+    def coverage_percentage(self) -> float:
+        area = self.target_area_m2
+        return 100.0 * self.placed_area_m2 / area if area > 0 else 0.0
 
 
 def shelf_pack(
     slabs: Iterable[InventorySlab],
-    project_width_mm: float,
-    project_height_mm: float,
+    target: TargetArea,
 ) -> ShelfPackResult:
     """Place slabs left-to-right, wrap to a new row when out of width.
 
     A slab is moved to ``overflow`` if it is wider/taller than the
-    project itself, or if the next row would push it past the top edge.
+    target itself, or if the next row would push it past the top edge.
     The first slab on every row is placed even if it exceeds the
     remaining width, because the wrap happens before placement — the
-    only way to overflow is to be physically larger than the project.
+    only way to overflow is to be physically larger than the target.
     """
-    if project_width_mm <= 0 or project_height_mm <= 0:
-        raise ValueError(
-            f"project dimensions must be positive; got "
-            f"{project_width_mm}x{project_height_mm}"
-        )
+    width = target.width_mm
+    height = target.height_mm
 
     placements: list[Placement] = []
     overflow: list[InventorySlab] = []
@@ -90,16 +99,16 @@ def shelf_pack(
     row_height = 0.0
 
     for slab in slabs:
-        if slab.width_mm > project_width_mm or slab.height_mm > project_height_mm:
+        if slab.width_mm > width or slab.height_mm > height:
             overflow.append(slab)
             continue
         # Wrap to next row if this slab won't fit on the current shelf.
-        if x + slab.width_mm > project_width_mm:
+        if x + slab.width_mm > width:
             x = 0.0
             y += row_height
             row_height = 0.0
         # New row could push past the top edge.
-        if y + slab.height_mm > project_height_mm:
+        if y + slab.height_mm > height:
             overflow.append(slab)
             continue
         placements.append(
@@ -120,6 +129,5 @@ def shelf_pack(
     return ShelfPackResult(
         placements=placements,
         overflow=overflow,
-        project_width_mm=project_width_mm,
-        project_height_mm=project_height_mm,
+        target=target,
     )
