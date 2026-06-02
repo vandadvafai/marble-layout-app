@@ -50,6 +50,12 @@ outputs/dxf_smoke_placement/**
 # V1 polygon-aware DXF placement outputs (regenerable).
 outputs/dxf_polygon_placement/**
 
+# V1 layout generator outputs (regenerable from DXF + tile size).
+outputs/layouts/**
+
+# V1 cut-list outputs (regenerable from layout.json).
+outputs/cut_lists/**
+
 # Local raw ERP fixtures (Excel exports + slab photos). Real customer
 # data; never committed. Use --excel / --images to point the V1 script
 # at wherever the files actually live.
@@ -67,6 +73,8 @@ data/
 !outputs/image_intake/.gitkeep
 !outputs/dxf_smoke_placement/.gitkeep
 !outputs/dxf_polygon_placement/.gitkeep
+!outputs/layouts/.gitkeep
+!outputs/cut_lists/.gitkeep
 
 # Duplicate / debug check artifacts
 *_check.json

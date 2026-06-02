@@ -3,12 +3,12 @@
 The detection / packing logic is exercised separately in
 ``test_inventory_*.py``. These tests focus on the CLI surface: does
 ``--target-*`` actually change what gets packed and what shows up in
-the placements JSON?
+the placement JSON?
 """
 
 from __future__ import annotations
 
-import importlib
+import importlib.util
 import json
 import sys
 from pathlib import Path
@@ -35,7 +35,6 @@ def smoke_cli():
 
 
 def _make_clean_slabs(tmp_path: Path) -> Path:
-    """Synthetic clean_slabs.json with three 2000×1000 slabs and no images."""
     records = []
     for i in range(3):
         records.append({
@@ -69,8 +68,12 @@ def _make_clean_slabs(tmp_path: Path) -> Path:
     return p
 
 
+def _load_placement(out: Path) -> dict:
+    return json.loads((out / "placement.json").read_text(encoding="utf-8"))
+
+
 # ---------------------------------------------------------------------------
-# Default / explicit target — demo-default flag behaviour
+# Demo-default behaviour
 # ---------------------------------------------------------------------------
 
 
@@ -80,13 +83,13 @@ def test_no_target_flags_uses_demo_defaults(tmp_path: Path, smoke_cli):
     rc = smoke_cli.main([
         "--inventory", str(clean),
         "--output", str(out),
-        "--no-preview",  # don't need matplotlib in this test
+        "--no-preview",
     ])
     assert rc == 0
-    data = json.loads((out / "smoke_placements.json").read_text())
-    assert data["target"]["is_demo_default"] is True
-    assert data["target"]["width_mm"] == 4000.0
-    assert data["target"]["height_mm"] == 3000.0
+    data = _load_placement(out)
+    assert data["metadata"]["is_demo_default"] is True
+    bbox = data["target"]["bbox"]
+    assert bbox == [0.0, 0.0, 4000.0, 3000.0]
     assert data["target"]["name"].startswith("demo default")
 
 
@@ -102,10 +105,9 @@ def test_explicit_target_dimensions_disable_demo_flag(tmp_path: Path, smoke_cli)
         "--no-preview",
     ])
     assert rc == 0
-    data = json.loads((out / "smoke_placements.json").read_text())
-    assert data["target"]["is_demo_default"] is False
-    assert data["target"]["width_mm"] == 5000.0
-    assert data["target"]["height_mm"] == 3000.0
+    data = _load_placement(out)
+    assert data["metadata"]["is_demo_default"] is False
+    assert data["target"]["bbox"] == [0.0, 0.0, 5000.0, 3000.0]
     assert data["target"]["name"] == "Test Room"
 
 
@@ -127,59 +129,93 @@ def test_one_dimension_without_the_other_is_an_error(tmp_path: Path, smoke_cli):
 
 
 def test_5000x3000_target_packs_more_than_3000x2000(tmp_path: Path, smoke_cli):
-    """Three 2000×1000 slabs: 5×3 fits all three, 3×2 fits at most two."""
     clean = _make_clean_slabs(tmp_path)
 
-    big = tmp_path / "big"
-    rc = smoke_cli.main([
+    big_out = tmp_path / "big"
+    smoke_cli.main([
         "--inventory", str(clean),
         "--target-width-mm", "5000",
         "--target-height-mm", "3000",
         "--target-name", "Big Room",
-        "--output", str(big),
+        "--output", str(big_out),
         "--no-preview",
     ])
-    assert rc == 0
-    big_data = json.loads((big / "smoke_placements.json").read_text())
+    big = _load_placement(big_out)
 
-    small = tmp_path / "small"
-    rc = smoke_cli.main([
+    small_out = tmp_path / "small"
+    smoke_cli.main([
         "--inventory", str(clean),
         "--target-width-mm", "3000",
         "--target-height-mm", "2000",
         "--target-name", "Small Room",
-        "--output", str(small),
+        "--output", str(small_out),
         "--no-preview",
     ])
-    assert rc == 0
-    small_data = json.loads((small / "smoke_placements.json").read_text())
+    small = _load_placement(small_out)
 
-    # Big target packs more slabs.
-    assert len(big_data["placements"]) > len(small_data["placements"])
-    # Big target has higher coverage% than small one.
-    assert big_data["coverage_percentage"] != small_data["coverage_percentage"]
-    # The target dims in the JSON reflect what we asked for.
-    assert big_data["target"]["width_mm"] == 5000.0
-    assert small_data["target"]["width_mm"] == 3000.0
+    assert len(big["placements"]) > len(small["placements"])
+    assert big["derived"]["coverage_percentage"] != small["derived"]["coverage_percentage"]
 
 
-def test_target_required_area_mismatch_recorded(tmp_path: Path, smoke_cli):
-    """A required_area_m2 wildly off the rectangle area should warn."""
+def test_target_required_area_round_trip(tmp_path: Path, smoke_cli):
     clean = _make_clean_slabs(tmp_path)
     out = tmp_path / "out"
     rc = smoke_cli.main([
         "--inventory", str(clean),
         "--target-width-mm", "5000",
-        "--target-height-mm", "3000",   # calculated = 15 m²
-        "--target-required-area-m2", "30.0",  # 100% off
+        "--target-height-mm", "3000",
+        "--target-required-area-m2", "30.0",
         "--output", str(out),
         "--no-preview",
     ])
     assert rc == 0
-    data = json.loads((out / "smoke_placements.json").read_text())
-    # required_area_m2 round-trips into the JSON.
-    assert data["target"]["required_area_m2"] == 30.0
-    # The warning code is reachable via the helper; we don't surface it
-    # in the JSON yet (V1 keeps the placements.json minimal), but the
-    # CLI logs it. Sanity: the report file at least confirms the call
-    # path executes by virtue of the rc==0 above.
+    data = _load_placement(out)
+    # 30 m² requested vs 15 m² calculated → mismatch warning expected.
+    assert "required_area_mismatch" in data["metadata"]["target_warnings"]
+
+
+# ---------------------------------------------------------------------------
+# Preview files
+# ---------------------------------------------------------------------------
+
+
+def test_default_run_writes_geometric_and_textured_but_not_debug(tmp_path: Path, smoke_cli):
+    clean = _make_clean_slabs(tmp_path)
+    out = tmp_path / "out"
+    smoke_cli.main([
+        "--inventory", str(clean),
+        "--target-width-mm", "5000",
+        "--target-height-mm", "3000",
+        "--output", str(out),
+    ])
+    assert (out / "preview_geometric.png").exists()
+    assert (out / "preview_textured.png").exists()
+    assert not (out / "preview_debug.png").exists()
+
+
+def test_include_debug_writes_the_debug_png_too(tmp_path: Path, smoke_cli):
+    clean = _make_clean_slabs(tmp_path)
+    out = tmp_path / "out"
+    smoke_cli.main([
+        "--inventory", str(clean),
+        "--target-width-mm", "5000",
+        "--target-height-mm", "3000",
+        "--include-debug",
+        "--output", str(out),
+    ])
+    assert (out / "preview_debug.png").exists()
+
+
+def test_no_preview_writes_only_json(tmp_path: Path, smoke_cli):
+    clean = _make_clean_slabs(tmp_path)
+    out = tmp_path / "out"
+    smoke_cli.main([
+        "--inventory", str(clean),
+        "--target-width-mm", "5000",
+        "--target-height-mm", "3000",
+        "--output", str(out),
+        "--no-preview",
+    ])
+    assert (out / "placement.json").exists()
+    assert not (out / "preview_geometric.png").exists()
+    assert not (out / "preview_textured.png").exists()
