@@ -59,6 +59,9 @@ outputs/cut_lists/**
 # V1 assignment outputs (regenerable from cut_list.json + inventory).
 outputs/assignments/**
 
+# V1 optimised-assignment outputs (regenerable).
+outputs/optimised_assignments/**
+
 # Local raw ERP fixtures (Excel exports + slab photos). Real customer
 # data; never committed. Use --excel / --images to point the V1 script
 # at wherever the files actually live.
@@ -79,6 +82,7 @@ data/
 !outputs/layouts/.gitkeep
 !outputs/cut_lists/.gitkeep
 !outputs/assignments/.gitkeep
+!outputs/optimised_assignments/.gitkeep
 
 # Duplicate / debug check artifacts
 *_check.json
