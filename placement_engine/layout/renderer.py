@@ -111,12 +111,41 @@ def render_layout_geometric(
     ax.set_ylim(by0 - margin, by1 + margin)
     ax.set_aspect("equal")
 
+    # Surface the chosen anchor mode in the figure title — designers
+    # need to see which direction the auto-selector picked, and why
+    # the slivers (if any) landed where they did.
+    title = _build_title(result)
+    if title:
+        fig.suptitle(title, fontsize=9, y=0.995)
+
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.tight_layout(pad=0.4)
+    fig.tight_layout(pad=0.4, rect=(0.0, 0.0, 1.0, 0.97 if title else 1.0))
     fig.savefig(out_path, dpi=dpi, bbox_inches="tight", facecolor=BG_COLOR)
     plt.close(fig)
     return out_path
+
+
+def _build_title(result: LayoutResult) -> str:
+    """One-line plot title: tile size, anchor mode, sliver count.
+
+    Empty string when the layout was built without anchor selection
+    (lower-level ``generate_tile_layout`` entry point) — keeps the
+    figure clean for callers that don't go through the selector.
+    """
+    pieces = []
+    pieces.append(
+        f"{result.target.name or result.target.target_id}"
+    )
+    pieces.append(
+        f"tile {int(result.tile_width_mm)}×{int(result.tile_height_mm)} mm"
+    )
+    if result.anchor_mode:
+        pieces.append(f"anchor {result.anchor_mode}")
+    slivers = result.sliver_count
+    if slivers:
+        pieces.append(f"{slivers} sliver(s)")
+    return "   ·   ".join(pieces)
 
 
 def _figure_size(width_mm: float, height_mm: float) -> tuple[float, float]:

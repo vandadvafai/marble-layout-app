@@ -14,6 +14,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from placement_engine.layout.anchoring import SliverEvaluation, SliverPolicy
 from placement_engine.layout.inventory_stats import InventoryDimensionSummary
 from placement_engine.target_area.dxf_target import TargetGeometry
 
@@ -76,6 +77,18 @@ class LayoutResult:
     # ``None`` for explicit runs.
     source_inventory_path: str | None = None
     inventory_dimension_summary: InventoryDimensionSummary | None = None
+    # Anchor-selection trace (populated by
+    # ``generate_tile_layout_from_inventory``):
+    #   * ``anchor_mode`` — the winning mode (or ``"explicit_origin"``
+    #     when the caller bypassed selection by passing ``origin=``).
+    #     ``None`` for the bare ``generate_tile_layout`` entry point.
+    #   * ``sliver_policy`` — the cuttability thresholds in force.
+    #   * ``candidate_evaluations`` — every mode tried, with its
+    #     scorecard and which one was selected. Empty when the
+    #     anchor-selection layer wasn't invoked.
+    anchor_mode: str | None = None
+    sliver_policy: SliverPolicy | None = None
+    candidate_evaluations: list[SliverEvaluation] = field(default_factory=list)
 
     # -----------------------------------------------------------------
     # Derived metrics
@@ -132,6 +145,26 @@ class LayoutResult:
                     self.inventory_dimension_summary.to_dict()
                     if self.inventory_dimension_summary is not None else None
                 ),
+                # Anchor-selection trace. These are always emitted (as
+                # ``null`` / empty list when the lower-level entry
+                # point bypassed selection) so downstream consumers
+                # can rely on the keys being present.
+                "anchor_mode": self.anchor_mode,
+                "sliver_policy": (
+                    self.sliver_policy.to_dict()
+                    if self.sliver_policy is not None else None
+                ),
+                "min_sliver_width_mm": (
+                    self.sliver_policy.min_sliver_width_mm
+                    if self.sliver_policy is not None else None
+                ),
+                "min_sliver_height_mm": (
+                    self.sliver_policy.min_sliver_height_mm
+                    if self.sliver_policy is not None else None
+                ),
+                "candidate_evaluations": [
+                    ev.to_dict() for ev in self.candidate_evaluations
+                ],
             },
             "pieces": [
                 {

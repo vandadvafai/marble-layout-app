@@ -21,6 +21,17 @@ from typing import Iterable
 from shapely.geometry import MultiPolygon, Polygon as ShPolygon
 from shapely.geometry.base import BaseGeometry
 
+from placement_engine.layout.anchoring import (
+    ANCHOR_AUTO,
+    ANCHOR_BOTTOM_LEFT,
+    DEFAULT_CANDIDATE_MODES,
+    SUPPORTED_ANCHOR_MODES,
+    SliverEvaluation,
+    SliverPolicy,
+    compute_anchor_origin,
+    evaluate_layout,
+    score_evaluation,
+)
 from placement_engine.layout.inventory_stats import (
     HasDimensions,
     compute_inventory_dimension_summary,
@@ -166,6 +177,9 @@ def generate_tile_layout_from_inventory(
     source_inventory_path: str | None = None,
     origin: tuple[float, float] | None = None,
     sliver_area_fraction: float = DEFAULT_SLIVER_AREA_FRACTION,
+    anchor_mode: str = ANCHOR_AUTO,
+    sliver_policy: SliverPolicy | None = None,
+    candidate_modes: tuple[str, ...] | None = None,
 ) -> LayoutResult:
     """Generate a tile-grid layout using the inventory's median slab size.
 
@@ -175,23 +189,121 @@ def generate_tile_layout_from_inventory(
     client is laying. Use ``generate_tile_layout`` directly only when
     an explicit override is required (debug, testing, designer pick).
 
+    ``anchor_mode`` controls where the grid is anchored:
+
+      * ``"auto"`` (default): every mode in ``candidate_modes`` is
+        tried and the one with the fewest uncuttable slivers wins
+        (see ``anchoring.score_evaluation`` for the full priority).
+      * an explicit anchor name (``"bottom_left"``, …): that origin
+        is used directly, no candidate search.
+
+    Passing an explicit ``origin=`` always takes precedence — anchor
+    selection is skipped and the origin is used as-is. This preserves
+    the lower-level escape hatch the tests already rely on.
+
     The returned ``LayoutResult.layout_basis`` is
     ``"inventory_median"``, and ``inventory_dimension_summary`` carries
     the full stats so the JSON trace records why this tile size was
     chosen.
     """
     summary = compute_inventory_dimension_summary(inventory)
-    result = generate_tile_layout(
-        geometry,
-        tile_width_mm=summary.median_width_mm,
-        tile_height_mm=summary.median_height_mm,
-        origin=origin,
-        sliver_area_fraction=sliver_area_fraction,
+    policy = sliver_policy if sliver_policy is not None else SliverPolicy()
+    candidates = (
+        candidate_modes if candidate_modes is not None
+        else DEFAULT_CANDIDATE_MODES
     )
+
+    if origin is not None:
+        # Explicit origin overrides everything — used by tests and
+        # designer debug. Anchor metadata is left unset because the
+        # origin no longer corresponds to any of the named modes.
+        result = generate_tile_layout(
+            geometry,
+            tile_width_mm=summary.median_width_mm,
+            tile_height_mm=summary.median_height_mm,
+            origin=origin,
+            sliver_area_fraction=sliver_area_fraction,
+        )
+        chosen_mode = "explicit_origin"
+        evaluations: list[SliverEvaluation] = []
+    elif anchor_mode == ANCHOR_AUTO:
+        result, chosen_mode, evaluations = _generate_with_auto_anchor(
+            geometry, summary, sliver_area_fraction, policy, candidates,
+        )
+    else:
+        if anchor_mode not in SUPPORTED_ANCHOR_MODES:
+            raise ValueError(
+                f"unsupported anchor_mode {anchor_mode!r}; "
+                f"choose one of {(*SUPPORTED_ANCHOR_MODES, ANCHOR_AUTO)}"
+            )
+        chosen_origin = compute_anchor_origin(
+            geometry.bbox,
+            summary.median_width_mm, summary.median_height_mm,
+            anchor_mode,
+        )
+        result = generate_tile_layout(
+            geometry,
+            tile_width_mm=summary.median_width_mm,
+            tile_height_mm=summary.median_height_mm,
+            origin=chosen_origin,
+            sliver_area_fraction=sliver_area_fraction,
+        )
+        ev = evaluate_layout(result, anchor_mode=anchor_mode, policy=policy)
+        ev.selected = True
+        chosen_mode = anchor_mode
+        evaluations = [ev]
+
     result.layout_basis = LAYOUT_BASIS_INVENTORY_MEDIAN
     result.source_inventory_path = source_inventory_path
     result.inventory_dimension_summary = summary
+    result.anchor_mode = chosen_mode
+    result.sliver_policy = policy
+    result.candidate_evaluations = evaluations
     return result
+
+
+def _generate_with_auto_anchor(
+    geometry: TargetGeometry,
+    summary,
+    sliver_area_fraction: float,
+    policy: SliverPolicy,
+    candidates: tuple[str, ...],
+) -> tuple[LayoutResult, str, list[SliverEvaluation]]:
+    """Build a layout for every candidate anchor and return the best.
+
+    Best = lowest tuple under ``score_evaluation``. All candidates are
+    returned in the evaluations list (with ``selected=True`` set on
+    the winner) so the JSON trace explains *why* a given mode beat
+    the alternatives.
+    """
+    if not candidates:
+        raise ValueError("candidate_modes must contain at least one anchor")
+
+    layouts: list[tuple[LayoutResult, SliverEvaluation]] = []
+    for mode in candidates:
+        origin = compute_anchor_origin(
+            geometry.bbox,
+            summary.median_width_mm, summary.median_height_mm,
+            mode,
+        )
+        layout = generate_tile_layout(
+            geometry,
+            tile_width_mm=summary.median_width_mm,
+            tile_height_mm=summary.median_height_mm,
+            origin=origin,
+            sliver_area_fraction=sliver_area_fraction,
+        )
+        ev = evaluate_layout(layout, anchor_mode=mode, policy=policy)
+        layouts.append((layout, ev))
+
+    layouts.sort(key=lambda pair: score_evaluation(pair[1]))
+    best_layout, best_ev = layouts[0]
+    best_ev.selected = True
+    # Return the evaluations in original candidate order so the JSON
+    # output reads as a stable "we tried X, then Y, here's why X won".
+    eval_by_mode = {ev.anchor_mode: ev for _, ev in layouts}
+    ordered_evals = [eval_by_mode[m] for m in candidates]
+    return best_layout, best_ev.anchor_mode, ordered_evals
 
 
 # ---------------------------------------------------------------------------
