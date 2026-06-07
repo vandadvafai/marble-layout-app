@@ -379,9 +379,13 @@ def test_full_piece_priority_over_smaller_classes(tmp_path: Path):
         target_id="t", name="t",
         boundary=[(0, 0), (1500, 0), (1500, 2205), (0, 2205)],
     )
+    # Disable absorption so the test fixture keeps its raw full + 5 mm
+    # sliver shape. This test exercises the optimiser's priority logic,
+    # not layout-time sliver folding.
     layout = generate_tile_layout_from_inventory(
         target,
         [type("S", (), {"width_mm": 1500, "height_mm": 2200})()],
+        enable_absorption=False,
     )
     layout_path = write_layout_json(layout, tmp_path / "lay.json")
     cl_path = write_cut_list_json(

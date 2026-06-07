@@ -21,6 +21,7 @@ from typing import Any, Iterable
 from shapely.geometry import MultiPolygon, Polygon as ShPolygon
 from shapely.geometry.base import BaseGeometry
 
+from placement_engine.layout.absorption import absorb_slivers
 from placement_engine.layout.anchoring import (
     ANCHOR_AUTO,
     ANCHOR_BOTTOM_LEFT,
@@ -183,6 +184,7 @@ def generate_tile_layout_from_inventory(
     sliver_policy: SliverPolicy | None = None,
     candidate_modes: tuple[str, ...] | None = None,
     enable_zoning: bool = True,
+    enable_absorption: bool = True,
 ) -> LayoutResult:
     """Generate a tile-grid layout using the inventory's median slab size.
 
@@ -313,7 +315,7 @@ def generate_tile_layout_from_inventory(
     # candidate_evaluations for multi-zone layouts.
     is_multi_zone = len(populated_zones) > 1
     primary = populated_zones[0]
-    return LayoutResult(
+    result = LayoutResult(
         target=geometry,
         tile_width_mm=float(summary.median_width_mm),
         tile_height_mm=float(summary.median_height_mm),
@@ -331,6 +333,13 @@ def generate_tile_layout_from_inventory(
         ),
         zones=populated_zones,
     )
+    # Final fabrication-realism pass: fold every sub-cuttable sliver
+    # into a same-zone rectangular neighbour. The result is what the
+    # cutting shop will actually receive; downstream layers see the
+    # absorbed (larger) pieces and never see the standalone slivers.
+    if enable_absorption:
+        absorb_slivers(result, policy=policy)
+    return result
 
 
 def _zone_to_target_geometry(

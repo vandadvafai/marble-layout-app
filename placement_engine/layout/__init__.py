@@ -17,6 +17,7 @@ Public API:
     render_layout_geometric()  clean CAD-style PNG preview
 """
 
+from placement_engine.layout.absorption import absorb_slivers
 from placement_engine.layout.anchoring import (
     ANCHOR_AUTO,
     ANCHOR_BOTTOM_LEFT,
@@ -74,6 +75,7 @@ __all__ = [
     "LayoutResult",
     "LayoutZone",
     "Piece",
+    "absorb_slivers",
     "SUPPORTED_ANCHOR_MODES",
     "SliverEvaluation",
     "SliverPolicy",
