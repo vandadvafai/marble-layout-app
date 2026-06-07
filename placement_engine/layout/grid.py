@@ -16,7 +16,7 @@ suffix). Slabs are NOT consulted at this stage.
 from __future__ import annotations
 
 import math
-from typing import Iterable
+from typing import Any, Iterable
 
 from shapely.geometry import MultiPolygon, Polygon as ShPolygon
 from shapely.geometry.base import BaseGeometry
@@ -37,11 +37,13 @@ from placement_engine.layout.inventory_stats import (
     compute_inventory_dimension_summary,
 )
 from placement_engine.layout.schema import (
+    ANCHOR_PER_ZONE,
     LAYOUT_BASIS_EXPLICIT,
     LAYOUT_BASIS_INVENTORY_MEDIAN,
     LayoutResult,
     Piece,
 )
+from placement_engine.layout.zoning import LayoutZone, decompose_into_zones
 from placement_engine.target_area.dxf_target import TargetGeometry
 
 # Area-comparison tolerance (mm²). Two areas differing by less than
@@ -180,6 +182,7 @@ def generate_tile_layout_from_inventory(
     anchor_mode: str = ANCHOR_AUTO,
     sliver_policy: SliverPolicy | None = None,
     candidate_modes: tuple[str, ...] | None = None,
+    enable_zoning: bool = True,
 ) -> LayoutResult:
     """Generate a tile-grid layout using the inventory's median slab size.
 
@@ -213,10 +216,10 @@ def generate_tile_layout_from_inventory(
         else DEFAULT_CANDIDATE_MODES
     )
 
+    # Explicit origin overrides every other path — used by tests and
+    # designer debug. Anchor + zone metadata are left unset because
+    # the caller has bypassed both the selector and the decomposer.
     if origin is not None:
-        # Explicit origin overrides everything — used by tests and
-        # designer debug. Anchor metadata is left unset because the
-        # origin no longer corresponds to any of the named modes.
         result = generate_tile_layout(
             geometry,
             tile_width_mm=summary.median_width_mm,
@@ -224,42 +227,128 @@ def generate_tile_layout_from_inventory(
             origin=origin,
             sliver_area_fraction=sliver_area_fraction,
         )
-        chosen_mode = "explicit_origin"
-        evaluations: list[SliverEvaluation] = []
-    elif anchor_mode == ANCHOR_AUTO:
-        result, chosen_mode, evaluations = _generate_with_auto_anchor(
-            geometry, summary, sliver_area_fraction, policy, candidates,
-        )
+        result.layout_basis = LAYOUT_BASIS_INVENTORY_MEDIAN
+        result.source_inventory_path = source_inventory_path
+        result.inventory_dimension_summary = summary
+        result.anchor_mode = "explicit_origin"
+        result.sliver_policy = policy
+        return result
+
+    # Zone decomposition (or single-zone bypass) drives the rest of
+    # the entry point. Disabling zoning collapses to a single bbox
+    # zone — the pre-zoning behaviour — for callers that explicitly
+    # want it.
+    if enable_zoning:
+        zones = decompose_into_zones(geometry)
     else:
-        if anchor_mode not in SUPPORTED_ANCHOR_MODES:
+        bx0, by0, bx1, by1 = geometry.bbox
+        zones = [LayoutZone(
+            zone_id="z0",
+            bbox=(bx0, by0, bx1, by1),
+            polygon=[(bx0, by0), (bx1, by0), (bx1, by1), (bx0, by1), (bx0, by0)],
+            interior_holes=[
+                [(float(x), float(y)) for x, y in hole]
+                for hole in geometry.holes
+            ],
+        )]
+
+    # Tile every zone independently. Each zone runs its own anchor
+    # selection so a sliver landing in zone A doesn't influence zone B.
+    all_pieces: list[Piece] = []
+    populated_zones: list[LayoutZone] = []
+    for zone in zones:
+        zone_geom = _zone_to_target_geometry(geometry, zone)
+        if anchor_mode == ANCHOR_AUTO:
+            zone_layout, chosen_mode, evaluations = _generate_with_auto_anchor(
+                zone_geom, summary, sliver_area_fraction, policy, candidates,
+                zone_bbox=zone.bbox,
+                exterior_edges=zone.exterior_edges,
+            )
+        elif anchor_mode in SUPPORTED_ANCHOR_MODES:
+            chosen_origin = compute_anchor_origin(
+                zone_geom.bbox,
+                summary.median_width_mm, summary.median_height_mm,
+                anchor_mode,
+            )
+            zone_layout = generate_tile_layout(
+                zone_geom,
+                tile_width_mm=summary.median_width_mm,
+                tile_height_mm=summary.median_height_mm,
+                origin=chosen_origin,
+                sliver_area_fraction=sliver_area_fraction,
+            )
+            ev = evaluate_layout(
+                zone_layout, anchor_mode=anchor_mode, policy=policy,
+                zone_bbox=zone.bbox, exterior_edges=zone.exterior_edges,
+            )
+            ev.selected = True
+            chosen_mode = anchor_mode
+            evaluations = [ev]
+        else:
             raise ValueError(
                 f"unsupported anchor_mode {anchor_mode!r}; "
                 f"choose one of {(*SUPPORTED_ANCHOR_MODES, ANCHOR_AUTO)}"
             )
-        chosen_origin = compute_anchor_origin(
-            geometry.bbox,
-            summary.median_width_mm, summary.median_height_mm,
-            anchor_mode,
-        )
-        result = generate_tile_layout(
-            geometry,
-            tile_width_mm=summary.median_width_mm,
-            tile_height_mm=summary.median_height_mm,
-            origin=chosen_origin,
-            sliver_area_fraction=sliver_area_fraction,
-        )
-        ev = evaluate_layout(result, anchor_mode=anchor_mode, policy=policy)
-        ev.selected = True
-        chosen_mode = anchor_mode
-        evaluations = [ev]
 
-    result.layout_basis = LAYOUT_BASIS_INVENTORY_MEDIAN
-    result.source_inventory_path = source_inventory_path
-    result.inventory_dimension_summary = summary
-    result.anchor_mode = chosen_mode
-    result.sliver_policy = policy
-    result.candidate_evaluations = evaluations
-    return result
+        # Stamp the zone identity onto every piece. When more than one
+        # zone exists, also prefix the piece_id so identifiers stay
+        # globally unique. Single-zone layouts preserve the historical
+        # ``tile_rN_cN`` IDs verbatim so backward-compat tests pass.
+        for p in zone_layout.pieces:
+            p.zone_id = zone.zone_id
+            if len(zones) > 1:
+                p.piece_id = f"{zone.zone_id}_{p.piece_id}"
+            all_pieces.append(p)
+
+        zone.anchor_mode = chosen_mode
+        zone.origin = zone_layout.origin
+        zone.candidate_evaluations = evaluations
+        zone.piece_count = len(zone_layout.pieces)
+        populated_zones.append(zone)
+
+    # Build the final LayoutResult by combining all per-zone outputs.
+    # Top-level anchor metadata mirrors the only zone when there's a
+    # single zone (so existing JSON consumers keep reading the same
+    # fields); switches to ``ANCHOR_PER_ZONE`` and empty top-level
+    # candidate_evaluations for multi-zone layouts.
+    is_multi_zone = len(populated_zones) > 1
+    primary = populated_zones[0]
+    return LayoutResult(
+        target=geometry,
+        tile_width_mm=float(summary.median_width_mm),
+        tile_height_mm=float(summary.median_height_mm),
+        origin=primary.origin if primary.origin is not None else geometry.bbox[:2],
+        pieces=all_pieces,
+        layout_basis=LAYOUT_BASIS_INVENTORY_MEDIAN,
+        source_inventory_path=source_inventory_path,
+        inventory_dimension_summary=summary,
+        anchor_mode=(
+            ANCHOR_PER_ZONE if is_multi_zone else primary.anchor_mode
+        ),
+        sliver_policy=policy,
+        candidate_evaluations=(
+            [] if is_multi_zone else list(primary.candidate_evaluations)
+        ),
+        zones=populated_zones,
+    )
+
+
+def _zone_to_target_geometry(
+    parent: TargetGeometry, zone: LayoutZone,
+) -> TargetGeometry:
+    """Build a per-zone TargetGeometry the tile generator can clip to.
+
+    The zone's rectangle becomes the boundary; any interior holes that
+    the decomposer assigned to this zone are carried verbatim. The
+    parent target's identity is preserved with a zone suffix so
+    diagnostics can trace pieces back to their source.
+    """
+    return TargetGeometry(
+        target_id=f"{parent.target_id}__{zone.zone_id}",
+        name=parent.name,
+        boundary=list(zone.polygon),
+        holes=[list(hole) for hole in zone.interior_holes],
+    )
 
 
 def _generate_with_auto_anchor(
@@ -268,6 +357,9 @@ def _generate_with_auto_anchor(
     sliver_area_fraction: float,
     policy: SliverPolicy,
     candidates: tuple[str, ...],
+    *,
+    zone_bbox: tuple[float, float, float, float] | None = None,
+    exterior_edges: Any = None,
 ) -> tuple[LayoutResult, str, list[SliverEvaluation]]:
     """Build a layout for every candidate anchor and return the best.
 
@@ -275,6 +367,11 @@ def _generate_with_auto_anchor(
     returned in the evaluations list (with ``selected=True`` set on
     the winner) so the JSON trace explains *why* a given mode beat
     the alternatives.
+
+    When ``zone_bbox`` + ``exterior_edges`` are supplied, slivers are
+    additionally classified by whether they land on interior zone
+    seams — the scoring then penalises those landings ahead of total
+    sliver area (see ``score_evaluation``).
     """
     if not candidates:
         raise ValueError("candidate_modes must contain at least one anchor")
@@ -293,7 +390,10 @@ def _generate_with_auto_anchor(
             origin=origin,
             sliver_area_fraction=sliver_area_fraction,
         )
-        ev = evaluate_layout(layout, anchor_mode=mode, policy=policy)
+        ev = evaluate_layout(
+            layout, anchor_mode=mode, policy=policy,
+            zone_bbox=zone_bbox, exterior_edges=exterior_edges,
+        )
         layouts.append((layout, ev))
 
     layouts.sort(key=lambda pair: score_evaluation(pair[1]))

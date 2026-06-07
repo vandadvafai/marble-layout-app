@@ -96,6 +96,12 @@ class SliverEvaluation:
     anchor_mode: str
     sliver_count: int                 # pieces flagged ``sliver`` by area
     uncuttable_piece_count: int       # edge pieces below the cuttable threshold
+    # Subset of sliver_count: pieces whose bbox touches an INTERIOR
+    # zone edge (i.e. a zone-to-zone seam rather than the floor's outer
+    # boundary). A hairline strip on an exterior edge can be hidden
+    # along the wall; the same strip on an interior seam shows up
+    # right at the architectural step line. Critical V2 metric.
+    interior_sliver_count: int
     total_sliver_area_m2: float       # sum of areas of sliver-flagged pieces
     min_sliver_width_mm: float | None
     min_sliver_height_mm: float | None
@@ -111,6 +117,7 @@ class SliverEvaluation:
             "anchor_mode": self.anchor_mode,
             "sliver_count": self.sliver_count,
             "uncuttable_piece_count": self.uncuttable_piece_count,
+            "interior_sliver_count": self.interior_sliver_count,
             "total_sliver_area_m2": round(self.total_sliver_area_m2, 6),
             "min_sliver_width_mm": (
                 round(self.min_sliver_width_mm, 3)
@@ -180,6 +187,8 @@ def evaluate_layout(
     *,
     anchor_mode: str,
     policy: SliverPolicy,
+    zone_bbox: tuple[float, float, float, float] | None = None,
+    exterior_edges: Any = None,
 ) -> SliverEvaluation:
     """Compute the sliver-evaluation scorecard for a given layout.
 
@@ -194,6 +203,14 @@ def evaluate_layout(
       be cut.
 
     The two sets overlap heavily but neither is a subset of the other.
+
+    When ``zone_bbox`` + ``exterior_edges`` are supplied (caller is the
+    zoned tile generator), each sliver is additionally classified as
+    landing on an *interior* zone edge (zone-to-zone seam) or an
+    *exterior* one (the parent floor's outer boundary). Interior
+    slivers count separately because they show up between two
+    otherwise-clean zones and look worse than slivers tucked against
+    the actual room wall.
     """
     slivers = [p for p in layout.pieces if "sliver" in p.notes]
     uncuttable_edges = [
@@ -212,10 +229,18 @@ def evaluate_layout(
             for p in edge_pieces
         )
 
+    interior_slivers = 0
+    if zone_bbox is not None and exterior_edges is not None:
+        interior_slivers = sum(
+            1 for p in slivers
+            if _piece_touches_interior_edge(p, zone_bbox, exterior_edges)
+        )
+
     return SliverEvaluation(
         anchor_mode=anchor_mode,
         sliver_count=len(slivers),
         uncuttable_piece_count=len(uncuttable_edges),
+        interior_sliver_count=interior_slivers,
         total_sliver_area_m2=sum(p.actual_area_m2 for p in slivers),
         min_sliver_width_mm=(
             min(p.bounding_width_mm for p in slivers) if slivers else None
@@ -228,6 +253,39 @@ def evaluate_layout(
     )
 
 
+# Tolerance for "piece edge coincides with zone edge". Sub-mm slop is
+# common after Shapely intersections.
+_EDGE_COINCIDE_TOL_MM: float = 0.5
+
+
+def _piece_touches_interior_edge(
+    piece: Any,
+    zone_bbox: tuple[float, float, float, float],
+    exterior_edges: Any,
+) -> bool:
+    """True iff the piece's bbox touches any zone edge that's interior."""
+    # Compute piece bbox from its actual polygon — the ``nominal_*``
+    # fields describe the unclipped tile, not the clipped piece.
+    xs = [x for x, _ in piece.actual_cut_polygon]
+    ys = [y for _, y in piece.actual_cut_polygon]
+    if not xs or not ys:
+        return False
+    px0, py0, px1, py1 = min(xs), min(ys), max(xs), max(ys)
+    zx0, zy0, zx1, zy1 = zone_bbox
+    touches_left = abs(px0 - zx0) < _EDGE_COINCIDE_TOL_MM
+    touches_right = abs(px1 - zx1) < _EDGE_COINCIDE_TOL_MM
+    touches_bottom = abs(py0 - zy0) < _EDGE_COINCIDE_TOL_MM
+    touches_top = abs(py1 - zy1) < _EDGE_COINCIDE_TOL_MM
+    # Interior iff touching at least one edge that the zoner flagged
+    # as non-exterior.
+    return (
+        (touches_left and not exterior_edges.left)
+        or (touches_right and not exterior_edges.right)
+        or (touches_bottom and not exterior_edges.bottom)
+        or (touches_top and not exterior_edges.top)
+    )
+
+
 def score_evaluation(ev: SliverEvaluation) -> tuple:
     """Return a sort key; lower is better.
 
@@ -235,9 +293,15 @@ def score_evaluation(ev: SliverEvaluation) -> tuple:
     final ``anchor_mode`` field is the deterministic tie-break so the
     selector is reproducible across runs even when two candidates are
     indistinguishable on every cutting-relevant metric.
+
+    The ``interior_sliver_count`` term sits ahead of total area on
+    purpose: an interior sliver shows up *at the architectural step
+    line* and is the exact thing zoning is designed to avoid. Even a
+    much larger exterior sliver is preferable.
     """
     return (
         ev.uncuttable_piece_count,
+        ev.interior_sliver_count,
         ev.sliver_count,
         # Round to micrometres² to absorb Shapely's float noise on
         # otherwise-identical areas.

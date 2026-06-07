@@ -157,16 +157,43 @@ def test_score_evaluation_orders_by_uncuttable_first_then_count_then_area():
     """Hand-built evaluations show the priority chain is strict."""
     from placement_engine.layout.anchoring import SliverEvaluation
 
-    a = SliverEvaluation("a", sliver_count=5, uncuttable_piece_count=1,
-                         total_sliver_area_m2=0.01,
-                         min_sliver_width_mm=10.0, min_sliver_height_mm=10.0,
-                         min_edge_piece_side_mm=200.0, edge_piece_count=5)
-    b = SliverEvaluation("b", sliver_count=10, uncuttable_piece_count=0,
-                         total_sliver_area_m2=10.0,
-                         min_sliver_width_mm=50.0, min_sliver_height_mm=50.0,
-                         min_edge_piece_side_mm=50.0, edge_piece_count=10)
+    a = SliverEvaluation(
+        "a", sliver_count=5, uncuttable_piece_count=1,
+        interior_sliver_count=0,
+        total_sliver_area_m2=0.01,
+        min_sliver_width_mm=10.0, min_sliver_height_mm=10.0,
+        min_edge_piece_side_mm=200.0, edge_piece_count=5,
+    )
+    b = SliverEvaluation(
+        "b", sliver_count=10, uncuttable_piece_count=0,
+        interior_sliver_count=10,
+        total_sliver_area_m2=10.0,
+        min_sliver_width_mm=50.0, min_sliver_height_mm=50.0,
+        min_edge_piece_side_mm=50.0, edge_piece_count=10,
+    )
     # b has 10× the slivers and waste but ZERO uncuttable — must beat a.
     assert score_evaluation(b) < score_evaluation(a)
+
+
+def test_interior_sliver_count_outranks_total_area():
+    """An anchor with 1 interior sliver loses to one with 5 exterior
+    slivers — the interior landing is what zoning is meant to avoid."""
+    from placement_engine.layout.anchoring import SliverEvaluation
+    interior = SliverEvaluation(
+        "a", sliver_count=1, uncuttable_piece_count=1,
+        interior_sliver_count=1,
+        total_sliver_area_m2=0.01,
+        min_sliver_width_mm=20.0, min_sliver_height_mm=2200.0,
+        min_edge_piece_side_mm=20.0, edge_piece_count=1,
+    )
+    exterior = SliverEvaluation(
+        "b", sliver_count=5, uncuttable_piece_count=1,
+        interior_sliver_count=0,
+        total_sliver_area_m2=5.0,
+        min_sliver_width_mm=20.0, min_sliver_height_mm=2200.0,
+        min_edge_piece_side_mm=20.0, edge_piece_count=5,
+    )
+    assert score_evaluation(exterior) < score_evaluation(interior)
 
 
 # ---------------------------------------------------------------------------
@@ -174,23 +201,39 @@ def test_score_evaluation_orders_by_uncuttable_first_then_count_then_area():
 # ---------------------------------------------------------------------------
 
 
-def test_l_shape_auto_selects_bottom_right_to_reduce_sliver_area():
-    """The L-shape's right edge produces a 50 mm sliver under the
-    historical bottom-left anchor. Anchoring from the right keeps the
-    same sliver count but reduces total sliver area (the second sliver
-    row only spans 400 mm vs 1800 mm), so the auto-selector must
-    flip to ``bottom_right`` — exactly what the designer does by hand.
+def test_l_shape_auto_selects_per_zone_anchoring():
+    """The L-shape now decomposes into two zones; each zone runs its
+    own anchor selection. Top-level anchor reads ``per_zone``; each
+    zone's anchor lands its slivers on the floor's EXTERIOR boundary,
+    not the architectural step line between the two zones.
+
+    Concrete expectation:
+      * z0 (lower-left, 4800×2600) picks ``bottom_right`` — leftover
+        lands at x=0 (the room's left wall), away from the step.
+      * z1 (upper-right column, 3200×4000) picks ``bottom_left`` —
+        leftover lands at x=8000 (the room's right wall), away from
+        the step.
+    Both zones report zero interior slivers in the selected candidate.
     """
+    from placement_engine.layout import ANCHOR_PER_ZONE
     geom = load_target_geometry_from_dxf(EX_L)
     layout = generate_tile_layout_from_inventory(geom, _real_inventory())
-    assert layout.anchor_mode == ANCHOR_BOTTOM_RIGHT
-    # Both candidates must appear in the JSON trace.
-    modes = {ev.anchor_mode for ev in layout.candidate_evaluations}
-    assert modes == set(DEFAULT_CANDIDATE_MODES)
-    selected = next(ev for ev in layout.candidate_evaluations if ev.selected)
-    rejected = next(ev for ev in layout.candidate_evaluations if not ev.selected)
-    assert selected.anchor_mode == ANCHOR_BOTTOM_RIGHT
-    assert selected.total_sliver_area_m2 < rejected.total_sliver_area_m2
+
+    # Top-level metadata switches to per-zone for multi-zone layouts.
+    assert layout.anchor_mode == ANCHOR_PER_ZONE
+    assert len(layout.zones) == 2
+    # Top-level candidate_evaluations is empty when zoning is in use —
+    # the per-zone evaluations live on each LayoutZone.
+    assert layout.candidate_evaluations == []
+
+    by_id = {z.zone_id: z for z in layout.zones}
+    assert by_id["z0"].anchor_mode == ANCHOR_BOTTOM_RIGHT
+    assert by_id["z1"].anchor_mode == ANCHOR_BOTTOM_LEFT
+
+    # Selected candidate of each zone has zero interior slivers.
+    for zone in layout.zones:
+        selected = next(ev for ev in zone.candidate_evaluations if ev.selected)
+        assert selected.interior_sliver_count == 0
 
 
 # ---------------------------------------------------------------------------
@@ -309,24 +352,45 @@ def test_custom_sliver_policy_changes_uncuttable_threshold():
 
 
 def test_layout_json_includes_anchor_and_sliver_policy(tmp_path: Path):
-    """Every new grid field is present in the JSON output and round-trips."""
+    """For a multi-zone L-shape: top-level anchor reads per_zone; the
+    sliver policy and zone metadata are present; per-zone candidate
+    evaluations live inside ``grid.zones``.
+    """
+    from placement_engine.layout import ANCHOR_PER_ZONE
     geom = load_target_geometry_from_dxf(EX_L)
     layout = generate_tile_layout_from_inventory(geom, _real_inventory())
     path = write_layout_json(layout, tmp_path / "layout.json")
     data = json.loads(path.read_text(encoding="utf-8"))
     grid = data["grid"]
-    assert grid["anchor_mode"] == ANCHOR_BOTTOM_RIGHT
+    assert grid["anchor_mode"] == ANCHOR_PER_ZONE
     assert grid["min_sliver_width_mm"] == 100.0
     assert grid["min_sliver_height_mm"] == 100.0
     assert grid["sliver_policy"] == {
         "min_sliver_width_mm": 100.0, "min_sliver_height_mm": 100.0,
     }
-    cand = grid["candidate_evaluations"]
-    assert len(cand) == 2
-    assert {c["anchor_mode"] for c in cand} == set(DEFAULT_CANDIDATE_MODES)
-    selected = [c for c in cand if c["selected"]]
-    assert len(selected) == 1
-    assert selected[0]["anchor_mode"] == ANCHOR_BOTTOM_RIGHT
+    # Top-level candidate_evaluations is empty in multi-zone mode.
+    assert grid["candidate_evaluations"] == []
+    # Per-zone evaluations are inside grid.zones.
+    assert grid["zone_count"] == 2
+    zones = grid["zones"]
+    assert len(zones) == 2
+    for z in zones:
+        assert len(z["candidate_evaluations"]) == 2
+        sel = [c for c in z["candidate_evaluations"] if c["selected"]]
+        assert len(sel) == 1
+        assert "exterior_edges" in z
+        assert set(z["exterior_edges"].keys()) == {"left", "right", "bottom", "top"}
+
+
+def test_single_zone_layout_keeps_anchor_in_top_level(tmp_path: Path):
+    """A clean rectangle is one zone — top-level anchor still reports
+    that zone's selected mode (backward-compat for callers reading
+    ``grid.anchor_mode`` directly)."""
+    layout = generate_tile_layout_from_inventory(_rect(6000, 4000), _real_inventory())
+    assert layout.anchor_mode == ANCHOR_BOTTOM_LEFT
+    assert len(layout.zones) == 1
+    # Single-zone layouts also mirror candidate_evaluations at the top.
+    assert len(layout.candidate_evaluations) == 2
 
 
 def test_explicit_generate_tile_layout_has_null_anchor_fields(tmp_path: Path):

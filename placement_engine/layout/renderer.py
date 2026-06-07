@@ -27,6 +27,10 @@ EDGE_PIECE_EDGE = "#5a7090"
 EDGE_PIECE_LINEWIDTH = 0.6
 SLIVER_FACE = "#ffe9d8"
 SLIVER_EDGE = "#cc7733"
+# Zone outline — dashed teal, distinct from boundary (black) and edge
+# pieces (grey-blue). Only drawn when multi-zone.
+ZONE_OUTLINE_COLOR = "#2a7f7f"
+ZONE_OUTLINE_LINEWIDTH = 1.1
 LABEL_COLOR = "#606060"
 LABEL_FONTSIZE = 6
 
@@ -90,7 +94,31 @@ def render_layout_geometric(
             zorder=z,
         ))
 
-    # 3. Boundary on top.
+    # 3. Zone outlines, drawn UNDER the boundary so the boundary
+    #    line still reads as the "real" floor edge. Skipped when the
+    #    layout has zero or one zone — nothing useful to show.
+    if len(result.zones) > 1:
+        for zone in result.zones:
+            zx0, zy0, zx1, zy1 = zone.bbox
+            ax.add_patch(mpatches.Rectangle(
+                (zx0, zy0), zx1 - zx0, zy1 - zy0,
+                fill=False, edgecolor=ZONE_OUTLINE_COLOR,
+                linewidth=ZONE_OUTLINE_LINEWIDTH,
+                linestyle=(0, (4, 3)),  # short dashes
+                zorder=5,
+            ))
+            # Tiny zone label at the bbox center, low z so pieces
+            # cover it where they need to.
+            cx, cy = (zx0 + zx1) / 2.0, zy0 + (zy1 - zy0) * 0.96
+            ax.text(
+                cx, cy, zone.zone_id,
+                fontsize=LABEL_FONTSIZE + 1, color=ZONE_OUTLINE_COLOR,
+                ha="center", va="top", zorder=5,
+                bbox=dict(facecolor="white", edgecolor="none", alpha=0.85,
+                          pad=1.5),
+            )
+
+    # 4. Boundary on top.
     ax.add_patch(mpatches.Polygon(
         target.boundary, closed=True, fill=False,
         edgecolor=BOUNDARY_COLOR, linewidth=BOUNDARY_LINEWIDTH, zorder=6,
@@ -142,6 +170,8 @@ def _build_title(result: LayoutResult) -> str:
     )
     if result.anchor_mode:
         pieces.append(f"anchor {result.anchor_mode}")
+    if len(result.zones) > 1:
+        pieces.append(f"{len(result.zones)} zones")
     slivers = result.sliver_count
     if slivers:
         pieces.append(f"{slivers} sliver(s)")

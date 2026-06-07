@@ -16,7 +16,18 @@ from typing import Any
 
 from placement_engine.layout.anchoring import SliverEvaluation, SliverPolicy
 from placement_engine.layout.inventory_stats import InventoryDimensionSummary
+from placement_engine.layout.zoning import LayoutZone
 from placement_engine.target_area.dxf_target import TargetGeometry
+
+# Sentinel ``anchor_mode`` value for layouts whose pieces span more
+# than one zone. Each zone in ``LayoutResult.zones`` then carries its
+# own ``anchor_mode``; the top-level field exists for backward-compat
+# JSON consumers only.
+ANCHOR_PER_ZONE: str = "per_zone"
+# Default zone id stamped on every piece when zoning collapsed to a
+# single rectangle covering the bbox. Lets every downstream consumer
+# rely on ``piece.zone_id`` being a non-empty string.
+DEFAULT_ZONE_ID: str = "z0"
 
 # Sentinel layout-basis labels surfaced in the JSON / report.
 LAYOUT_BASIS_INVENTORY_MEDIAN: str = "inventory_median"
@@ -57,6 +68,11 @@ class Piece:
     interior_holes: list[list[tuple[float, float]]] = field(default_factory=list)
     # Free-form notes — e.g. "sliver", "split_by_hole". Designer-facing.
     notes: list[str] = field(default_factory=list)
+    # The zone this piece was generated inside. Always populated by
+    # the inventory-driven entry point (defaults to ``"z0"`` for
+    # single-zone layouts); ``"z0"`` is also the default when a piece
+    # is constructed directly via the lower-level grid generator.
+    zone_id: str = DEFAULT_ZONE_ID
 
 
 @dataclass
@@ -89,6 +105,19 @@ class LayoutResult:
     anchor_mode: str | None = None
     sliver_policy: SliverPolicy | None = None
     candidate_evaluations: list[SliverEvaluation] = field(default_factory=list)
+    # Zone decomposition trace. Populated by the inventory-driven
+    # entry point; always at least one entry (the bbox) when zoning
+    # ran. Empty when the lower-level ``generate_tile_layout`` was
+    # called directly (no zoning step).
+    #
+    # Multi-zone layouts (more than one entry here):
+    #   * ``anchor_mode`` above is ``"per_zone"``
+    #   * top-level ``candidate_evaluations`` is empty
+    #   * per-zone anchor / origin / evaluations live in each
+    #     ``LayoutZone``
+    # Single-zone layouts mirror the per-zone metadata into the
+    # top-level fields so existing JSON consumers keep working.
+    zones: list[LayoutZone] = field(default_factory=list)
 
     # -----------------------------------------------------------------
     # Derived metrics
@@ -165,6 +194,11 @@ class LayoutResult:
                 "candidate_evaluations": [
                     ev.to_dict() for ev in self.candidate_evaluations
                 ],
+                # Zone decomposition trace. Always present (empty list
+                # when zoning didn't run) so consumers can rely on the
+                # key existing.
+                "zones": [z.to_dict() for z in self.zones],
+                "zone_count": len(self.zones),
             },
             "pieces": [
                 {
