@@ -56,6 +56,12 @@ RULE_SEAMS_NEAR_COLUMNS: str = "R5_seams_near_columns"
 RULE_SMALL_PIECES_IN_LOW_VISIBILITY: str = "R6_small_pieces_in_low_visibility"
 RULE_FULL_SLABS_IN_DOORWAYS: str = "R7_full_slabs_in_doorways"
 RULE_ABSORBED_SLIVERS: str = "R8_absorbed_slivers"
+# Coverage is the second hard rule. The layout layer can technically
+# produce partial-coverage layouts (e.g. when a candidate origin shifts
+# tiles off the bbox left edge), but those layouts leave bare floor —
+# unacceptable for a real install. Same penalty weight as R1 so any
+# coverage shortfall lands the candidate firmly in the invalid pool.
+RULE_FULL_COVERAGE: str = "R9_full_coverage"
 
 # rule status labels
 STATUS_PASS: str = "pass"
@@ -72,6 +78,11 @@ STATUS_NOT_APPLICABLE: str = "not_applicable"
 # means the piece is fabrication-impossible — should never happen
 # post-absorption, so we want a giant red flag if it does.
 _PENALTY_BELOW_MIN: float = 100.0
+
+# Coverage shortfall — also a hard violation. One penalty per
+# candidate (the rule is binary: either the layout covers the floor
+# or it doesn't).
+_PENALTY_COVERAGE_SHORTFALL: float = 100.0
 
 # Doorway seam crossing — strong constraint; main entrance is worse.
 _PENALTY_DOORWAY_SEAM: float = 25.0
@@ -381,6 +392,33 @@ def evaluate_layout(
     breakdown[RULE_MIN_PIECE_SIZE] = delta
     score += delta
 
+    # R9 — full coverage (hard). Compare the layout's pre-computed
+    # coverage_percentage against the plan's min_coverage_ratio
+    # (default 99.9%). Partial-coverage layouts leave bare floor and
+    # are not real candidates — disqualify them.
+    derived = layout_dict.get("derived", {})
+    coverage_pct = float(derived.get("coverage_percentage", 0.0))
+    coverage_ratio = coverage_pct / 100.0
+    min_ratio = float(plan.min_coverage_ratio)
+    coverage_short = coverage_ratio + 1e-9 < min_ratio
+    delta = -_PENALTY_COVERAGE_SHORTFALL if coverage_short else 0.0
+    rules.append(RuleResult(
+        rule_id=RULE_FULL_COVERAGE,
+        status=STATUS_VIOLATION if coverage_short else STATUS_PASS,
+        count=1 if coverage_short else 0,
+        message=(
+            f"Coverage {coverage_ratio * 100:.2f}% is below the "
+            f"required {min_ratio * 100:.2f}% — the layout leaves "
+            f"bare floor."
+            if coverage_short else
+            f"Coverage {coverage_ratio * 100:.2f}% meets or exceeds "
+            f"the required {min_ratio * 100:.2f}%."
+        ),
+        score_delta=delta,
+    ))
+    breakdown[RULE_FULL_COVERAGE] = delta
+    score += delta
+
     # R2 — no seams in doorways (strong)
     door_crossings = [se for se in seam_evals if se.crosses_doorways]
     main_crossings = [se for se in door_crossings if se.crosses_main_entrance]
@@ -521,16 +559,27 @@ def evaluate_layout(
     score += small_delta
 
     # R7 — full slabs covering doorways (soft reward)
-    # A "full slab" piece is one that's still a nominal tile-sized rect
-    # (no absorbed sliver, no edge clipping). When it crosses a doorway
-    # line, we reward — it's the designer's preferred outcome.
-    full_doorway_pieces = [
-        pe for pe in piece_evals
-        if pe.crosses_doorway
-        and not pe.is_below_min
-        and not pe.is_absorbed_holder
-    ]
-    delta = _REWARD_FULL_SLAB_DOORWAY * len(full_doorway_pieces)
+    # Designer intent: prefer a SINGLE slab spanning the entire
+    # doorway opening (no seam in the threshold). Per doorway,
+    # we look for one piece whose footprint contains the full
+    # doorway segment — i.e. the piece spans from before the
+    # doorway's first endpoint to after its second, *and* it
+    # extends across the threshold so the slab actually sits
+    # over the opening. Two adjacent tiles each covering half do
+    # NOT qualify: that's a seam in the doorway (caught by R2).
+    spanning_by_doorway: dict[str, str] = {}
+    for dr, dr_line in doorway_lines:
+        for pe in piece_evals:
+            if pe.is_below_min or pe.is_absorbed_holder:
+                continue
+            piece_poly = piece_polygons.get(pe.piece_id)
+            if piece_poly is None:
+                continue
+            if _piece_fully_spans_doorway(piece_poly, dr_line):
+                spanning_by_doorway[dr.doorway_id] = pe.piece_id
+                break  # one piece per doorway is enough
+    spanning_piece_ids = list(spanning_by_doorway.values())
+    delta = _REWARD_FULL_SLAB_DOORWAY * len(spanning_by_doorway)
     if not plan.doorways:
         rules.append(RuleResult(
             rule_id=RULE_FULL_SLABS_IN_DOORWAYS,
@@ -540,20 +589,23 @@ def evaluate_layout(
         ))
         breakdown[RULE_FULL_SLABS_IN_DOORWAYS] = 0.0
     else:
+        n_spanned = len(spanning_by_doorway)
+        n_doorways = len(plan.doorways)
         rules.append(RuleResult(
             rule_id=RULE_FULL_SLABS_IN_DOORWAYS,
             status=(
-                STATUS_REWARD if full_doorway_pieces else STATUS_PASS
+                STATUS_REWARD if n_spanned else STATUS_PASS
             ),
-            count=len(full_doorway_pieces),
+            count=n_spanned,
             message=(
-                f"{len(full_doorway_pieces)} piece(s) span a doorway as "
-                "a single slab."
-                if full_doorway_pieces else
-                "No single-slab spans across any doorway (designers "
-                "may want to revisit the layout)."
+                f"{n_spanned} of {n_doorways} doorway(s) covered by a "
+                f"single slab spanning the full opening."
+                if n_spanned else
+                f"None of {n_doorways} doorway(s) covered by a single "
+                f"slab spanning the full opening (designers may want "
+                f"to revisit the layout)."
             ),
-            affected_ids=[pe.piece_id for pe in full_doorway_pieces],
+            affected_ids=spanning_piece_ids,
             score_delta=delta,
         ))
         breakdown[RULE_FULL_SLABS_IN_DOORWAYS] = delta
@@ -577,11 +629,14 @@ def evaluate_layout(
     ))
     breakdown[RULE_ABSORBED_SLIVERS] = 0.0
 
-    hard_count = sum(1 for r in rules if r.status == STATUS_VIOLATION
-                     and r.rule_id == RULE_MIN_PIECE_SIZE)
+    _HARD_RULES = {RULE_MIN_PIECE_SIZE, RULE_FULL_COVERAGE}
+    hard_count = sum(
+        1 for r in rules
+        if r.status == STATUS_VIOLATION and r.rule_id in _HARD_RULES
+    )
     soft_count = sum(
         1 for r in rules
-        if r.status == STATUS_VIOLATION and r.rule_id != RULE_MIN_PIECE_SIZE
+        if r.status == STATUS_VIOLATION and r.rule_id not in _HARD_RULES
     )
     reward_count = sum(1 for r in rules if r.status == STATUS_REWARD)
 
@@ -688,14 +743,78 @@ def _piece_crosses_doorway(
 def _seam_crosses_doorway(
     seam_line: LineString, doorway_line: LineString,
 ) -> bool:
-    """A seam crosses a doorway iff the two line segments actually
-    intersect at more than an endpoint. Shapely's ``crosses`` is the
-    right primitive (touching at an endpoint = doesn't cross)."""
+    """A seam crosses a doorway iff it intersects the doorway segment
+    *inside the opening* — not just at one of the doorway's endpoints
+    (the wall corners).
+
+    Three cases qualify:
+
+    1. Shapely.crosses — true interior-to-interior crossing.
+    2. Co-linear overlap — the seam runs along the doorway segment.
+    3. Point intersection where the seam touches the doorway segment
+       at a point strictly inside the opening (e.g. a vertical seam
+       between two adjacent floor tiles emanating from a point in the
+       middle of the threshold). Shapely.crosses misses this case
+       because the touch is at one of the seam's endpoints, but a
+       seam landing in the middle of the opening IS a conflict.
+    """
     if seam_line.is_empty or doorway_line.is_empty:
         return False
     if seam_line.crosses(doorway_line):
         return True
-    # Cover the "seam runs along the doorway segment" case too —
-    # Shapely treats that as overlap rather than cross.
     inter = seam_line.intersection(doorway_line)
-    return not inter.is_empty and inter.length > 0.0
+    if inter.is_empty:
+        return False
+    # Co-linear overlap — non-zero length intersection.
+    if getattr(inter, "length", 0.0) > 0.0:
+        return True
+    # Point intersection — does the touch point fall strictly inside
+    # the doorway segment (not at a wall corner)?
+    if inter.geom_type == "Point":
+        return _point_strictly_inside_segment(inter, doorway_line)
+    return False
+
+
+def _point_strictly_inside_segment(
+    point: Point, segment: LineString, tol: float = 1.0,
+) -> bool:
+    """True iff ``point`` lies on ``segment`` and is not within ``tol``
+    millimetres of either endpoint. We use a 1 mm tolerance because
+    grid origins and column coordinates can have float noise on that
+    order; anything inside the segment by more than 1 mm is a real
+    interior touch.
+    """
+    coords = list(segment.coords)
+    if len(coords) < 2:
+        return False
+    x0, y0 = coords[0]
+    x1, y1 = coords[-1]
+    px, py = point.x, point.y
+    d0 = ((px - x0) ** 2 + (py - y0) ** 2) ** 0.5
+    d1 = ((px - x1) ** 2 + (py - y1) ** 2) ** 0.5
+    return d0 > tol and d1 > tol
+
+
+def _piece_fully_spans_doorway(
+    piece_poly: ShPolygon, doorway_line: LineString,
+) -> bool:
+    """True iff the piece's footprint covers the entire doorway
+    segment as a single contiguous chunk.
+
+    We measure the length of the intersection between the piece
+    polygon and the doorway line segment and require it to equal
+    the full doorway length (within 1 mm). This catches the
+    "single slab spans the opening" case while excluding the
+    "two adjacent slabs each cover half" case — which would
+    produce two separate intersection segments, neither of full
+    length on its own.
+    """
+    if piece_poly is None or doorway_line.is_empty:
+        return False
+    door_length = doorway_line.length
+    if door_length <= 0:
+        return False
+    inter = piece_poly.intersection(doorway_line)
+    if inter.is_empty:
+        return False
+    return getattr(inter, "length", 0.0) >= door_length - 1.0

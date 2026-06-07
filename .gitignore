@@ -68,6 +68,9 @@ outputs/cutting_plans/**
 # V1 architectural-rule reports (regenerable from layout + cut_list + plan).
 outputs/architectural_reports/**
 
+# V1 architectural-selection outputs (regenerable from geometry + inventory + plan).
+outputs/architectural_selection/**
+
 # Local raw ERP fixtures (Excel exports + slab photos). Real customer
 # data; never committed. Use --excel / --images to point the V1 script
 # at wherever the files actually live.
@@ -91,6 +94,7 @@ data/
 !outputs/optimised_assignments/.gitkeep
 !outputs/cutting_plans/.gitkeep
 !outputs/architectural_reports/.gitkeep
+!outputs/architectural_selection/.gitkeep
 
 # Duplicate / debug check artifacts
 *_check.json

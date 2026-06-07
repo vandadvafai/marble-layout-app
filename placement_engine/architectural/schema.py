@@ -73,6 +73,11 @@ SUPPORTED_MATCHING_MODES: tuple[str, ...] = (
 # architectural layer is self-describing.
 DEFAULT_MIN_PIECE_WIDTH_MM: float = 100.0
 DEFAULT_MIN_PIECE_HEIGHT_MM: float = 100.0
+# Hard coverage threshold — any candidate covering less of the target
+# area than this fraction is disqualified. Default 99.9% leaves a tiny
+# tolerance for boundary-clipping float noise; designers can tighten
+# to 1.0 or relax to anything ≥ 0.
+DEFAULT_MIN_COVERAGE_RATIO: float = 0.999
 
 # A "small piece" for visibility scoring. Anything whose short bbox
 # side falls below this threshold is treated as small and penalised in
@@ -155,6 +160,35 @@ class Doorway:
 
 
 @dataclass
+class GuideLine:
+    """A primary architectural axis the layout should eventually
+    align with (a long wall, a feature line on the floor, the centre
+    line of an open span).
+
+    V1 status: schema placeholder only — the rule engine does NOT yet
+    align the tile grid to guide lines. The selector surfaces the
+    declared lines in its report so designers can see the engine
+    acknowledges them, and a later milestone will wire the
+    enforcement.
+    """
+
+    guide_line_id: str
+    segment: Segment
+    priority: int = 0
+    name: str = ""
+    notes: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "guide_line_id": self.guide_line_id,
+            "segment": [list(pt) for pt in self.segment],
+            "priority": self.priority,
+            "name": self.name,
+            "notes": list(self.notes),
+        }
+
+
+@dataclass
 class Column:
     """A column / pillar — a small obstruction near which seams are
     welcome (the column itself breaks the floor visually, so a seam
@@ -188,11 +222,16 @@ class ArchitecturalPlan:
     spaces: list[Space] = field(default_factory=list)
     doorways: list[Doorway] = field(default_factory=list)
     columns: list[Column] = field(default_factory=list)
+    # Designer-declared primary axes. V1: schema placeholder; the
+    # selector reports them but the layout layer does not yet align
+    # the tile grid to them.
+    guide_lines: list[GuideLine] = field(default_factory=list)
     matching_mode: str = MATCHING_NONE
     min_piece_width_mm: float = DEFAULT_MIN_PIECE_WIDTH_MM
     min_piece_height_mm: float = DEFAULT_MIN_PIECE_HEIGHT_MM
     small_piece_threshold_mm: float = DEFAULT_SMALL_PIECE_THRESHOLD_MM
     column_seam_proximity_mm: float = DEFAULT_COLUMN_SEAM_PROXIMITY_MM
+    min_coverage_ratio: float = DEFAULT_MIN_COVERAGE_RATIO
     # Free-form notes the designer wants to surface in the report
     # (e.g. "kitchen on east wall — under-cabinet zone TBD").
     notes: list[str] = field(default_factory=list)
@@ -205,9 +244,11 @@ class ArchitecturalPlan:
             "min_piece_height_mm": self.min_piece_height_mm,
             "small_piece_threshold_mm": self.small_piece_threshold_mm,
             "column_seam_proximity_mm": self.column_seam_proximity_mm,
+            "min_coverage_ratio": self.min_coverage_ratio,
             "spaces": [s.to_dict() for s in self.spaces],
             "doorways": [d.to_dict() for d in self.doorways],
             "columns": [c.to_dict() for c in self.columns],
+            "guide_lines": [g.to_dict() for g in self.guide_lines],
             "notes": list(self.notes),
         }
 

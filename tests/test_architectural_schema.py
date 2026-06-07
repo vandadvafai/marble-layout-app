@@ -93,7 +93,7 @@ def test_to_dict_keys_are_stable():
         "target_id", "matching_mode",
         "min_piece_width_mm", "min_piece_height_mm",
         "small_piece_threshold_mm", "column_seam_proximity_mm",
-        "spaces", "doorways", "columns", "notes",
+        "spaces", "doorways", "columns", "guide_lines", "notes",
     }
     assert set(d.keys()) == expected
 

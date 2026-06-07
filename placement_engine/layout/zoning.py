@@ -132,6 +132,11 @@ class LayoutZone:
             "candidate_evaluations": [
                 ev.to_dict() for ev in self.candidate_evaluations
             ],
+            "candidate_evaluations_note": (
+                "Pre-absorption sliver counts. Final cut pieces are "
+                "in pieces[] (top-level); absorbed slivers are tagged "
+                "on their holder piece's notes[]."
+            ),
             "exterior_edges": self.exterior_edges.to_dict(),
             "piece_count": self.piece_count,
         }

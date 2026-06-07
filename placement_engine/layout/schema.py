@@ -194,6 +194,19 @@ class LayoutResult:
                 "candidate_evaluations": [
                     ev.to_dict() for ev in self.candidate_evaluations
                 ],
+                # Sliver counts in candidate_evaluations describe the
+                # anchor-selector's PRE-ABSORPTION view. Slivers
+                # below the cuttable threshold are folded into
+                # adjacent pieces by the absorption pass — survivors
+                # are tagged with an "absorbed_sliver:<id>" note on
+                # the holder piece in pieces[]. Pieces actually
+                # exported as cuts are the rows in pieces[], never
+                # the entries listed here.
+                "candidate_evaluations_note": (
+                    "Pre-absorption sliver counts. Final cut pieces "
+                    "live in pieces[]; absorbed slivers are tagged "
+                    "on their holder piece's notes[]."
+                ),
                 # Zone decomposition trace. Always present (empty list
                 # when zoning didn't run) so consumers can rely on the
                 # key existing.
