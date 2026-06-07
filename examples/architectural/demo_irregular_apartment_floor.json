@@ -1,0 +1,58 @@
+{
+  "target_id": "demo_irregular_apartment_floor",
+  "matching_mode": "none",
+  "min_piece_width_mm": 100,
+  "min_piece_height_mm": 100,
+  "small_piece_threshold_mm": 300,
+  "column_seam_proximity_mm": 250,
+  "spaces": [
+    {
+      "space_id": "living_kitchen",
+      "name": "Living room / kitchen",
+      "polygon": [[0, 0], [8000, 0], [8000, 3000], [12000, 3000], [12000, 8000], [0, 8000]],
+      "visibility": "high",
+      "notes": [
+        "Open-plan living + kitchen. Single layout direction across the whole space."
+      ]
+    }
+  ],
+  "doorways": [
+    {
+      "doorway_id": "main_entrance",
+      "segment": [[3500, 0], [4500, 0]],
+      "is_main_entrance": true,
+      "name": "Main entrance",
+      "width_mm": 1000,
+      "notes": ["South wall of the lower bar."]
+    },
+    {
+      "doorway_id": "balcony_door",
+      "segment": [[11000, 8000], [12000, 8000]],
+      "is_main_entrance": false,
+      "name": "Balcony door",
+      "width_mm": 1000
+    }
+  ],
+  "columns": [
+    {
+      "column_id": "C1",
+      "polygon": [[2000, 2000], [2400, 2000], [2400, 2400], [2000, 2400]],
+      "name": "Living room column",
+      "notes": ["Treat as a natural seam break point."]
+    },
+    {
+      "column_id": "C2",
+      "polygon": [[6000, 5000], [6400, 5000], [6400, 5400], [6000, 5400]],
+      "name": "Kitchen column"
+    },
+    {
+      "column_id": "C3",
+      "polygon": [[9500, 5500], [10500, 5500], [10500, 6500], [9500, 6500]],
+      "name": "Bedroom column"
+    }
+  ],
+  "notes": [
+    "V1 demo plan for the apartment floor.",
+    "Three rectangular columns map onto the polygon holes from the layout."
+  ]
+}

@@ -1,0 +1,29 @@
+{
+  "target_id": "demo_rectangle_floor",
+  "matching_mode": "none",
+  "min_piece_width_mm": 100,
+  "min_piece_height_mm": 100,
+  "small_piece_threshold_mm": 300,
+  "spaces": [
+    {
+      "space_id": "main",
+      "name": "Single room",
+      "polygon": [[0, 0], [6000, 0], [6000, 4000], [0, 4000]],
+      "visibility": "high"
+    }
+  ],
+  "doorways": [
+    {
+      "doorway_id": "main_entrance",
+      "segment": [[2500, 0], [3500, 0]],
+      "is_main_entrance": true,
+      "name": "Main entrance",
+      "width_mm": 1000
+    }
+  ],
+  "columns": [],
+  "notes": [
+    "Trivial plan: one rectangular room with a single main entrance.",
+    "Useful as a regression fixture for the architectural rule layer."
+  ]
+}

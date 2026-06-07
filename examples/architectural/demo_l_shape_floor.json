@@ -1,0 +1,32 @@
+{
+  "target_id": "demo_l_shape_floor",
+  "matching_mode": "none",
+  "min_piece_width_mm": 100,
+  "min_piece_height_mm": 100,
+  "small_piece_threshold_mm": 300,
+  "column_seam_proximity_mm": 200,
+  "spaces": [
+    {
+      "space_id": "main",
+      "name": "Main living area",
+      "polygon": [[0, 0], [8000, 0], [8000, 4000], [4800, 4000], [4800, 2600], [0, 2600]],
+      "visibility": "high",
+      "notes": ["Open-plan L-shape; single layout direction."]
+    }
+  ],
+  "doorways": [
+    {
+      "doorway_id": "main_entrance",
+      "segment": [[3500, 0], [4500, 0]],
+      "is_main_entrance": true,
+      "name": "Main entrance",
+      "width_mm": 1000,
+      "notes": ["South wall, near the center of the lower bar."]
+    }
+  ],
+  "columns": [],
+  "notes": [
+    "V1 demo plan for the L-shape floor.",
+    "Single space, single main-entrance doorway, no columns."
+  ]
+}
