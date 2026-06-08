@@ -16,16 +16,11 @@ end-to-end L-shape check. The selector layer has its own test file.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
 from placement_engine.architectural import (
     ArchitecturalPlan,
     Doorway,
-    Space,
-    load_architectural_plan,
-    select_best_layout,
 )
 from placement_engine.architectural.rules import (
     RULE_FULL_COVERAGE,
@@ -36,14 +31,7 @@ from placement_engine.architectural.rules import (
     STATUS_VIOLATION,
     evaluate_layout,
 )
-from placement_engine.architectural.schema import (
-    DEFAULT_MIN_COVERAGE_RATIO,
-    VISIBILITY_HIGH,
-)
-from placement_engine.target_area import load_target_geometry_from_dxf
-
-REPO_ROOT = Path(__file__).resolve().parent.parent
-EX_L = REPO_ROOT / "examples/cad_inputs/demo/demo_l_shape_floor.dxf"
+from placement_engine.architectural.schema import DEFAULT_MIN_COVERAGE_RATIO
 
 
 # ---------------------------------------------------------------------------
@@ -321,83 +309,10 @@ def test_r2_does_not_fire_when_seam_touches_doorway_endpoint():
     assert _rule(report, RULE_NO_SEAMS_IN_DOORWAYS).status == STATUS_PASS
 
 
-# ---------------------------------------------------------------------------
-# End-to-end: rerun the L-shape selector and verify the user-reported
-# scoring bug is gone
-# ---------------------------------------------------------------------------
-
-
-def _l_shape_plan() -> ArchitecturalPlan:
-    return ArchitecturalPlan(
-        target_id="demo_l_shape_floor",
-        spaces=[Space(
-            "main", "Main living area",
-            polygon=[(0, 0), (8000, 0), (8000, 4000),
-                     (4800, 4000), (4800, 2600), (0, 2600)],
-            visibility=VISIBILITY_HIGH,
-        )],
-        doorways=[Doorway(
-            "main_entrance", segment=((3500, 0), (4500, 0)),
-            is_main_entrance=True, width_mm=1000,
-        )],
-    )
-
-
-def _real_inventory():
-    from dataclasses import dataclass
-
-    @dataclass
-    class _Slab:
-        width_mm: float
-        height_mm: float
-
-    return [
-        _Slab(1590, 1590), _Slab(1590, 1980), _Slab(1550, 2040),
-        _Slab(1590, 2200), _Slab(1570, 2320),
-        _Slab(1600, 2500), _Slab(1610, 2620),
-    ]
-
-
-def test_l_shape_c05_is_disqualified_by_coverage_after_fix():
-    """The user-reported scenario: C05 (offset_half_x) won with 91.82%
-    coverage in the previous milestone. With the coverage hard rule
-    in place, C05 must be marked invalid — coverage shortfall AND
-    a seam in the doorway both contribute to its rejection."""
-    geom = load_target_geometry_from_dxf(EX_L)
-    result = select_best_layout(geom, _real_inventory(), _l_shape_plan())
-    c05 = next(
-        c for c in result.candidates
-        if c.candidate_id.endswith("_offset_half_x")
-    )
-    assert not c05.is_valid
-    assert RULE_FULL_COVERAGE in c05.disqualifications
-
-
-def test_l_shape_winner_is_now_a_full_coverage_anchor_candidate():
-    """With coverage enforced and R7 fixed, the L-shape winner must
-    come from the anchor-strategy pool (the only pool with 100%
-    coverage on this fixture). Score should reflect the R7 fix:
-    +8 (one doorway × one single spanning slab), not +16 (the
-    pre-fix double-count)."""
-    geom = load_target_geometry_from_dxf(EX_L)
-    result = select_best_layout(geom, _real_inventory(), _l_shape_plan())
-    winner = result.selected
-    assert winner.is_valid
-    assert winner.strategy == "anchor"
-    # Score must not include the pre-fix +16 R7 bonus.
-    r7 = winner.report.score_breakdown.get("R7_full_slabs_in_doorways", 0.0)
-    assert r7 <= 8.0 + 1e-6, (
-        f"R7 reward is {r7}; pre-fix bug awarded +16 by counting "
-        f"two pieces each covering half the doorway."
-    )
-
-
-def test_l_shape_winner_design_score_at_most_108():
-    """Headline number from the validation report: pre-fix winner
-    scored 116 (108 + 8 from the inflated R7). Post-fix maximum is
-    108 (100 baseline + 8 for one spanned doorway). Any winner above
-    108 means the R7 fix regressed."""
-    geom = load_target_geometry_from_dxf(EX_L)
-    result = select_best_layout(geom, _real_inventory(), _l_shape_plan())
-    winner = result.selected
-    assert winner.design_score <= 108.0 + 1e-6
+# NOTE: three end-to-end tests that drove the selector + verified its
+# winner-after-fixes were removed when the automatic selector
+# direction was retired in 0.1.30. The pure rule tests above
+# (R1/R2/R7/R9) still exercise the same validation logic and remain
+# the contract the future interactive-UI backend validator must
+# satisfy. See the ``checkpoint-before-ui-pivot`` branch for the
+# original selector-driven assertions.
