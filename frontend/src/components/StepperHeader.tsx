@@ -49,7 +49,27 @@ export default function StepperHeader({
   const helpLabel = HELP_UI[defaultHelpLang()].helpButton;
   return (
     <header className="stepper-header">
-      <div className="stepper-brand">Stone Layout</div>
+      <div className="stepper-brand">
+        <span className="stepper-brand-logo" aria-hidden="true">
+          <svg viewBox="0 0 32 32" width="32" height="32">
+            <polygon
+              points="16,3 30,28 2,28"
+              fill="#0f1d3a"
+              stroke="#0f1d3a"
+              strokeWidth="1.5"
+              strokeLinejoin="round"
+            />
+            <polygon
+              points="16,11 24,25 8,25"
+              fill="#ffffff"
+            />
+          </svg>
+        </span>
+        <span className="stepper-brand-text">Avandad — Layout Helper</span>
+        <span className="stepper-brand-version" title="App version">
+          v1.0.0
+        </span>
+      </div>
       <ol className="stepper-list">
         {STEPS.map((step, idx) => (
           <li
@@ -75,28 +95,62 @@ export default function StepperHeader({
                   "stepper-connector"
                   + (completed[step.id] ? " stepper-connector-done" : "")
                 }
-              />
+                aria-hidden="true"
+              >
+                <svg viewBox="0 0 16 16" width="16" height="16">
+                  <path
+                    d="M3 8 H12 M9 5 L12 8 L9 11"
+                    fill="none" stroke="currentColor"
+                    strokeWidth="1.5" strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+              </span>
             )}
           </li>
         ))}
       </ol>
-      <button
-        type="button"
-        className="stepper-help-btn"
-        onClick={onOpenHelp}
-        title={helpLabel}
-        aria-label={helpLabel}
-      >
-        {helpLabel}
-      </button>
-      <button
-        type="button"
-        className="stepper-reset-btn"
-        onClick={onStartNewProject}
-        title="Discard the active project (edits, assignments, upload) and return to Step 1"
-      >
-        Start new project
-      </button>
+      <div className="stepper-header-actions">
+        <button
+          type="button"
+          className="stepper-help-btn"
+          onClick={onOpenHelp}
+          title={helpLabel}
+          aria-label={helpLabel}
+        >
+          <svg
+            viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"
+          >
+            <circle
+              cx="8" cy="8" r="6.5"
+              fill="none" stroke="currentColor" strokeWidth="1.4"
+            />
+            <path
+              d="M6 6.2 C6 4.8 7 4 8 4 C9.2 4 10 4.9 10 6 C10 7.2 8 7.4 8 9"
+              fill="none" stroke="currentColor" strokeWidth="1.4"
+              strokeLinecap="round"
+            />
+            <circle cx="8" cy="11.5" r="0.8" fill="currentColor" />
+          </svg>
+          <span>{helpLabel}</span>
+        </button>
+        <button
+          type="button"
+          className="stepper-reset-btn"
+          onClick={onStartNewProject}
+          title="Discard the active project (edits, assignments, upload) and return to Step 1"
+        >
+          <span>Start new project</span>
+          <svg
+            viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"
+          >
+            <path
+              d="M8 3 V13 M3 8 H13"
+              stroke="currentColor" strokeWidth="2" strokeLinecap="round"
+            />
+          </svg>
+        </button>
+      </div>
     </header>
   );
 }

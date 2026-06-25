@@ -23,6 +23,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import LayoutCanvas from "./components/LayoutCanvas";
 import ModeToolbar from "./components/ModeToolbar";
 import PiecesPanel from "./components/PiecesPanel";
+import PiecesSummaryCard from "./components/PiecesSummaryCard";
 import PropertiesPanel from "./components/PropertiesPanel";
 import SelectionProperties from "./components/SelectionProperties";
 import Step1PlanPanel from "./components/Step1PlanPanel";
@@ -1202,6 +1203,12 @@ export default function App() {
                   onValidateNow={runValidation}
                   onResetEdits={onResetEdits}
                 />
+                <PiecesSummaryCard
+                  pieces={displayedPieces}
+                  layout={data.layout}
+                  validation={validation}
+                  inventoryMatch={inventoryMatch}
+                />
                 <PiecesPanel
                   pieces={displayedPieces}
                   layout={data.layout}
@@ -1218,11 +1225,6 @@ export default function App() {
                     stack so it doesn't compete with the editing
                     tools but is always within reach. */}
                 <div className="step-next-bar">
-                  <span className="step-next-hint">
-                    {lastSavedAt
-                      ? `Saved ${formatSavedAt(lastSavedAt)}${isEdited ? " · edited" : ""}`
-                      : (isEdited ? "Edited" : "")}
-                  </span>
                   <button
                     type="button"
                     className="step-panel-primary"
@@ -1230,8 +1232,15 @@ export default function App() {
                     disabled={displayedPieces.length === 0}
                     title="Freeze the current pieces and continue to slab upload"
                   >
-                    Finalize layout →
+                    Finalize layout & continue →
                   </button>
+                  <span className="step-next-hint">
+                    DXF export will use final validated assignments
+                    {lastSavedAt && (
+                      <> · saved {formatSavedAt(lastSavedAt)}
+                        {isEdited ? " · edited" : ""}</>
+                    )}
+                  </span>
                 </div>
               </div>
             </div>
@@ -1294,6 +1303,12 @@ export default function App() {
               validation={null}
               inventoryMatch={inventoryMatch}
               assignments={assignments}
+            />
+            <PiecesSummaryCard
+              pieces={finalization.pieces}
+              layout={data.layout}
+              validation={null}
+              inventoryMatch={inventoryMatch}
             />
             <Step4ExportBar
               total={assignmentSummary.total}

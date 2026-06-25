@@ -248,9 +248,31 @@ function PieceBody({
           </div>
         </div>
       )}
-      <div className="props-row">
-        <span className="props-label">Piece</span>
-        <span className="props-value props-mono">{piece.piece_id}</span>
+      <div className="props-piece-id" title={piece.piece_id}>
+        <span>{piece.piece_id}</span>
+        <button
+          type="button"
+          className="props-piece-id-copy"
+          onClick={() => {
+            void navigator.clipboard?.writeText(piece.piece_id);
+          }}
+          title="Copy piece ID"
+          aria-label="Copy piece ID"
+        >
+          <svg
+            viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"
+          >
+            <rect
+              x="4" y="4" width="9" height="9" rx="1.6"
+              fill="none" stroke="currentColor" strokeWidth="1.4"
+            />
+            <path
+              d="M2.5 11 V3.5 A1.5 1.5 0 0 1 4 2 H10"
+              fill="none" stroke="currentColor" strokeWidth="1.4"
+              strokeLinecap="round"
+            />
+          </svg>
+        </button>
       </div>
       <div className="props-row">
         <span className="props-label">Zone</span>
