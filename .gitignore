@@ -12,6 +12,13 @@ venv/
 .coverage
 htmlcov/
 
+# Frontend (built artefacts + node modules — checked into the
+# frontend/ subtree's own .gitignore but listed here too as
+# belt-and-braces for tools that ignore subdirectory .gitignores).
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
 # OS / editor cruft
 .DS_Store
 *.swp

@@ -1,0 +1,2593 @@
+/* Minimal layout-only CSS. Visual design will arrive with the
+   editing milestone; this is enough to not look broken. */
+
+:root {
+  --bg: #f7f7f8;
+  --panel: #ffffff;
+  --border: #e2e2e6;
+  --text: #1c1c1f;
+  --muted: #6b6b73;
+  --accent: #2050a0;
+  --error-bg: #fde2e1;
+  --error-fg: #842029;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  /* 0.1.42 — pin the document so nothing inside can push body
+   * scroll. The right-panel stack and the canvas region each own
+   * their scroll (overflow: hidden / overflow-y: auto where
+   * appropriate). ``overscroll-behavior: contain`` keeps scroll
+   * gestures inside the panel they started in — they don't bubble
+   * up to the page even if the panel hit its scroll limit. */
+  overflow: hidden;
+  overscroll-behavior: contain;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  /* Was ``min-height: 100vh`` — allowed inner content to push the
+   * layout past the viewport and make the body scrollable. Pinning
+   * to the viewport height + ``overflow: hidden`` on body means
+   * scrolls always live inside child regions. */
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* While a seam is being dragged the canvas owns the gesture. Body
+ * scroll lock + ``touch-action: none`` on every interactive surface
+ * keeps wheel / trackpad / touch events from hijacking the drag. */
+body.dragging-seam,
+html.dragging-seam {
+  overflow: hidden !important;
+  touch-action: none !important;
+  cursor: ew-resize;
+  user-select: none !important;
+  -webkit-user-select: none !important;
+}
+
+.app-header {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 12px 20px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+}
+
+.app-header h1 {
+  font-size: 16px;
+  margin: 0;
+  font-weight: 600;
+}
+
+.demo-picker {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.demo-picker select {
+  font-size: 13px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: white;
+}
+
+.status {
+  font-size: 12px;
+  color: var(--muted);
+  margin-left: auto;
+}
+
+.canvas-wrap {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  min-height: 0;
+}
+
+.canvas-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 16px;
+  font-size: 12px;
+  color: var(--muted);
+  border-bottom: 1px solid var(--border);
+}
+
+.canvas-toolbar .target-label {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.canvas-toolbar .piece-count {
+  color: var(--muted);
+}
+
+/* "Working slab: 179 × 173 cm · from inventory" — sits in the
+ * canvas toolbar so the designer always knows what tile size their
+ * seam grid is based on. Background hint helps it read as a chip
+ * rather than free-floating text. */
+.canvas-toolbar .working-slab {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 8px;
+  background: rgba(70, 130, 220, 0.08);
+  border: 1px solid rgba(70, 130, 220, 0.18);
+  font-size: 11px;
+  color: var(--text);
+}
+.canvas-toolbar .working-slab strong {
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.canvas-toolbar .working-slab-basis {
+  color: var(--muted);
+}
+
+.reset-btn {
+  border: 1px solid var(--border);
+  background: white;
+  font-size: 12px;
+  padding: 3px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.reset-btn:hover {
+  background: var(--bg);
+}
+
+.canvas-toolbar .hint {
+  margin-left: auto;
+  font-style: italic;
+}
+
+.canvas-svg {
+  flex: 1 1 auto;
+  width: 100%;
+  height: 100%;
+  /* touch-action: none — block the browser's native pan/zoom so our
+   * pointer handlers are the only source of truth on touch devices.
+   * user-select: none + -webkit-user-select: none — prevent the
+   * browser from kicking off text selection mid-drag (which flickers
+   * the cursor and steals pointer events on Safari/Firefox). */
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: grab;
+  background: white;
+}
+
+/* Live seam HUD — DOM overlay anchored to the canvas-wrap, top-right
+ * corner. Stays out of the cursor's way while the designer drags,
+ * and the dimensions update every animation frame. */
+.canvas-wrap {
+  position: relative;
+}
+.seam-hud {
+  position: absolute;
+  top: 56px;       /* below the canvas-toolbar */
+  right: 16px;
+  background: rgba(255, 255, 255, 0.96);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 12px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+  font-size: 12px;
+  pointer-events: none;
+  z-index: 10;
+  min-width: 200px;
+}
+.seam-hud-title {
+  font-weight: 700;
+  margin-bottom: 6px;
+  color: #2050a0;
+}
+.seam-hud-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 2px 0;
+}
+.seam-hud-label {
+  color: var(--muted);
+}
+.seam-hud-value {
+  color: var(--text);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.canvas-svg:active {
+  cursor: grabbing;
+}
+
+.placeholder,
+.error {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  font-size: 14px;
+  color: var(--muted);
+}
+
+.error {
+  background: var(--error-bg);
+  color: var(--error-fg);
+}
+
+.error-hint {
+  margin-top: 8px;
+  font-size: 12px;
+}
+
+.error code {
+  background: white;
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+}
+
+.app-footer {
+  padding: 8px 20px;
+  font-size: 11px;
+  color: var(--muted);
+  border-top: 1px solid var(--border);
+  background: var(--panel);
+}
+
+/* --- canvas + validation sidebar layout ---------------------------------- */
+
+.canvas-and-panel {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.canvas-and-panel .canvas-wrap {
+  flex: 1 1 auto;
+  border-right: 1px solid var(--border);
+}
+
+.validation-panel {
+  flex: 0 0 320px;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  overflow: hidden;
+}
+
+.vp-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.vp-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.vp-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.vp-btn {
+  font-size: 12px;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  background: white;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.vp-btn:hover:not(:disabled) {
+  background: var(--bg);
+}
+
+.vp-btn:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.vp-empty,
+.vp-error {
+  padding: 18px 14px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.vp-error {
+  color: var(--error-fg);
+  background: var(--error-bg);
+}
+
+.vp-summary {
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  gap: 12px;
+}
+
+.vp-summary-badge {
+  font-size: 12px;
+  font-weight: 700;
+  padding: 8px 12px;
+  border-radius: 4px;
+  letter-spacing: 0.5px;
+}
+
+.vp-summary-valid .vp-summary-badge {
+  background: #e6f4ea;
+  color: #0f5132;
+}
+
+.vp-summary-invalid .vp-summary-badge {
+  background: #fde2e1;
+  color: #842029;
+}
+
+.vp-summary-meta {
+  font-size: 11px;
+  color: var(--muted);
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 2px 12px;
+}
+
+.vp-summary-meta strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.vp-rule-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  flex: 1 1 auto;
+}
+
+.vp-rule {
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+}
+
+.vp-rule-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.vp-rule-id {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 11px;
+  color: var(--text);
+}
+
+.vp-rule-status {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  padding: 2px 6px;
+  border-radius: 3px;
+}
+
+.rule-pass .vp-rule-status {
+  background: #e6f4ea;
+  color: #0f5132;
+}
+
+.rule-violation .vp-rule-status {
+  background: #fde2e1;
+  color: #842029;
+}
+
+.rule-reward .vp-rule-status {
+  background: #fff8d8;
+  color: #6a5500;
+}
+
+.rule-info .vp-rule-status,
+.rule-na .vp-rule-status {
+  background: #eef0f3;
+  color: var(--muted);
+}
+
+.vp-rule-delta {
+  margin-left: auto;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.vp-rule-msg {
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
+.vp-rule-affected {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.vp-rule-affected code {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  background: var(--bg);
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+
+/* --- mode toolbar -------------------------------------------------------- */
+
+.mode-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 16px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+}
+
+.mode-buttons {
+  display: inline-flex;
+  gap: 4px;
+}
+
+.mode-btn {
+  font-size: 12px;
+  padding: 5px 12px;
+  border: 1px solid var(--border);
+  background: white;
+  border-radius: 4px;
+  cursor: pointer;
+  color: var(--text);
+}
+
+.mode-btn:hover {
+  background: var(--bg);
+}
+
+.mode-btn-active {
+  background: var(--accent);
+  color: white;
+  border-color: var(--accent);
+}
+
+.mode-btn-active:hover {
+  background: #1a4380;
+}
+
+.mode-btn:disabled {
+  cursor: default;
+  opacity: 0.4;
+  background: white;
+  color: var(--muted);
+}
+
+.mode-btn:disabled:hover {
+  background: white;
+}
+
+.mode-toolbar-divider {
+  width: 1px;
+  align-self: stretch;
+  background: var(--border);
+  margin: 0 4px;
+}
+
+.mode-buttons-history .mode-btn {
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+}
+
+/* Two-section toolbar (0.1.41) — "Selection" vs "Editing" labels
+ * sit above their button row so the designer can see at a glance
+ * which group their current mode belongs to. */
+.mode-section {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
+.mode-section-label {
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--muted);
+  padding-left: 2px;
+}
+
+.mode-hint {
+  font-size: 12px;
+  color: var(--muted);
+  font-style: italic;
+}
+
+/* --- right column (properties + validation stacked) --------------------- */
+
+.right-stack {
+  flex: 0 0 320px;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  /* 0.1.42 — give the right stack its own scrollbar so long
+   * Properties / Validation / Pieces content scrolls inside the
+   * panel instead of pushing the whole app off-screen. The canvas
+   * is now always visible regardless of how deep the right-stack
+   * content gets. */
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  min-height: 0;
+}
+
+.right-stack .properties-panel {
+  flex: 0 0 auto;
+  max-height: 50%;
+  border-bottom: 1px solid var(--border);
+  overflow-y: auto;
+}
+
+.right-stack .validation-panel {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* The right-stack manages its own borders now; the freestanding
+   validation-panel border that the seam-editing milestone defined
+   is unnecessary in this layout. */
+.validation-panel {
+  flex: 1 1 auto;
+}
+
+/* --- properties panel ---------------------------------------------------- */
+
+.properties-panel {
+  display: flex;
+  flex-direction: column;
+}
+
+.pp-header {
+  padding: 10px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  border-bottom: 1px solid var(--border);
+}
+
+.pp-id {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 11px;
+  color: var(--muted);
+  background: var(--bg);
+  padding: 1px 5px;
+  border-radius: 3px;
+  margin-left: 6px;
+}
+
+.pp-empty {
+  padding: 16px 14px;
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.4;
+}
+
+.pp-empty code {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 11px;
+}
+
+.pp-form {
+  padding: 10px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.pp-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.pp-row > label {
+  flex: 0 0 110px;
+  color: var(--muted);
+}
+
+.pp-row > input[type="number"],
+.pp-row > input[type="text"] {
+  flex: 1 1 auto;
+  font-size: 12px;
+  padding: 4px 6px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  width: 100%;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+}
+
+.pp-row-pair {
+  display: flex;
+  gap: 4px;
+  flex: 1 1 auto;
+}
+
+.pp-row-pair input {
+  width: 50%;
+  font-size: 12px;
+  padding: 4px 6px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+}
+
+.pp-row-checkbox label {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text);
+}
+
+.pp-row-delete {
+  margin-top: 6px;
+  justify-content: flex-end;
+}
+
+.pp-delete-btn {
+  font-size: 12px;
+  padding: 5px 14px;
+  border: 1px solid #b51b1b;
+  background: #fde2e1;
+  color: #842029;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.pp-delete-btn:hover {
+  background: #f9d0cf;
+}
+
+/* --- canvas zoom controls (toolbar) ------------------------------------- */
+
+.canvas-zoom-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+}
+
+.zoom-btn {
+  width: 26px;
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+  background: white;
+  border-radius: 4px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 0;
+  line-height: 1;
+  color: var(--text);
+}
+
+.zoom-btn:hover {
+  background: var(--bg);
+}
+
+.canvas-toolbar .hint {
+  margin-left: 0;
+}
+
+/* --- pieces panel ------------------------------------------------------- */
+
+.pieces-panel {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  overflow: hidden;
+}
+
+.pieces-panel-header {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+
+/* --- inventory source header (under the pieces title) ---
+ * Compact one-line strip: "Inventory  [real]  8 valid · 0 invalid
+ * outputs/slab_ingestion/raw_test/clean_slabs.json".
+ * Shown in red when the boot fetch errored so misconfiguration is
+ * impossible to miss. */
+.inventory-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+  color: var(--muted);
+  background: rgba(0, 0, 0, 0.02);
+  flex-wrap: wrap;
+}
+.inventory-header-label {
+  font-weight: 600;
+  color: var(--text);
+}
+.inventory-source-chip {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 8px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+.inventory-source-real {
+  background: rgba(34, 139, 34, 0.15);
+  color: #1f7a1f;
+}
+.inventory-source-demo {
+  background: rgba(218, 165, 32, 0.18);
+  color: #8a6300;
+}
+.inventory-source-env {
+  background: rgba(70, 130, 180, 0.18);
+  color: #2a5d8a;
+}
+.inventory-source-other {
+  background: rgba(0, 0, 0, 0.08);
+  color: var(--text);
+}
+.inventory-header-counts {
+  color: var(--text);
+}
+.inventory-header-skipped {
+  color: #b00020;
+  font-weight: 600;
+}
+.inventory-header-path {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: right;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  color: var(--muted);
+}
+.inventory-header-error {
+  background: rgba(176, 0, 32, 0.08);
+  color: #b00020;
+}
+.inventory-header-error-text {
+  color: #b00020;
+}
+.inventory-header-loading-text {
+  font-style: italic;
+}
+
+.pieces-panel-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.pieces-panel-meta {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.pieces-panel-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.pieces-summary-pill {
+  font-size: 10.5px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 10px;
+  letter-spacing: 0.02em;
+}
+
+.pieces-summary-critical {
+  background: #fde2e1;
+  color: #842029;
+}
+
+.pieces-summary-high {
+  background: #ffe1c4;
+  color: #8a4a00;
+}
+
+.pieces-summary-medium {
+  background: #fff4d6;
+  color: #6a5500;
+}
+
+.pieces-summary-ok {
+  background: #e6f4ea;
+  color: #0f5132;
+}
+
+.pieces-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  overflow-y: auto;
+  flex: 1 1 auto;
+}
+
+.piece-row {
+  border-bottom: 1px solid var(--border);
+  border-left: 3px solid transparent;
+  transition: background 80ms ease;
+}
+
+.piece-row-critical { border-left-color: #c01010; }
+.piece-row-high     { border-left-color: #d18b00; }
+.piece-row-medium   { border-left-color: #c5a012; }
+.piece-row-low      { border-left-color: #7daccd; }
+.piece-row-none     { border-left-color: transparent; }
+
+.piece-row-selected {
+  background: #eef2fa;
+  border-left-color: #2050a0 !important;
+}
+
+.piece-row-summary {
+  width: 100%;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.piece-row-summary:hover {
+  background: var(--bg);
+}
+
+.piece-row-id {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 11.5px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.piece-row-dims {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+  font-size: 11.5px;
+  color: var(--text);
+}
+
+.piece-row-area {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.piece-row-badges {
+  grid-column: 1 / -2;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.piece-row-chevron {
+  grid-column: -2 / -1;
+  grid-row: 1;
+  font-size: 10px;
+  color: var(--muted);
+}
+
+.piece-row-empty {
+  padding: 16px;
+  font-size: 12px;
+  color: var(--muted);
+  font-style: italic;
+}
+
+.piece-badge {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  padding: 1px 6px;
+  border-radius: 9px;
+}
+
+.piece-badge-critical { background: #fde2e1; color: #842029; }
+.piece-badge-warn     { background: #fff4d6; color: #6a5500; }
+.piece-badge-info     { background: #e6f0fb; color: #1a4380; }
+
+.piece-details {
+  background: #fafbfd;
+  border-top: 1px dashed var(--border);
+  padding: 10px 14px 12px;
+  font-size: 12px;
+}
+
+.piece-detail-grid {
+  display: grid;
+  grid-template-columns: 95px 1fr;
+  row-gap: 4px;
+  column-gap: 12px;
+  margin-bottom: 8px;
+}
+
+.piece-detail-label {
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
+.piece-detail-value {
+  font-size: 11.5px;
+  color: var(--text);
+}
+
+.piece-detail-mono {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+.piece-callout {
+  background: #fff4d6;
+  border: 1px solid #d18b00;
+  border-radius: 4px;
+  padding: 8px 10px;
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: #6a5500;
+  margin-bottom: 8px;
+}
+
+.piece-callout strong { color: #1c1c1f; }
+
+.piece-detail-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+
+.piece-detail-notes-label {
+  font-size: 11.5px;
+  color: var(--muted);
+  margin-bottom: 2px;
+}
+
+.piece-detail-notes ul {
+  margin: 0;
+  padding-left: 16px;
+}
+
+.piece-detail-notes li {
+  font-size: 11px;
+}
+
+.piece-detail-notes code {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 10.5px;
+}
+
+/* --- inventory match chips + slab list (PiecesPanel) ------------------- */
+
+.piece-match-chip {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  padding: 1px 6px;
+  border-radius: 9px;
+  white-space: nowrap;
+}
+
+.match-status-exact   { background: #e6f4ea; color: #0f5132; }
+.match-status-matched { background: #e6f0fb; color: #1a4380; }
+.match-status-options { background: #e6f0fb; color: #1a4380; }
+.match-status-no      { background: #fde2e1; color: #842029; }
+
+.piece-slabs {
+  margin-top: 4px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--border);
+}
+
+.piece-slabs-label {
+  font-size: 11px;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+
+.piece-slabs-status {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.piece-slabs-empty {
+  font-size: 11.5px;
+  color: var(--muted);
+  font-style: italic;
+}
+
+.piece-slabs-no-match {
+  background: #fde2e1;
+  color: #842029;
+  padding: 8px 10px;
+  border-radius: 4px;
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+
+.piece-slabs-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.piece-slab-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  background: #ffffff;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 11.5px;
+}
+
+.piece-slab-id {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 11px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.piece-slab-dims {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
+.piece-slab-waste {
+  font-variant-numeric: tabular-nums;
+}
+
+.piece-slab-waste-pct {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.piece-slab-waste-label {
+  font-size: 10px;
+  color: var(--muted);
+}
+
+.piece-slab-flags {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 2px;
+}
+
+.piece-slab-flag {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 9px;
+  background: var(--bg);
+  color: var(--muted);
+}
+
+.piece-slab-rotate {
+  background: #fff4d6;
+  color: #6a5500;
+}
+
+.piece-slab-image {
+  background: #e6f0fb;
+  color: #1a4380;
+}
+
+/* --- right-stack: PropertiesPanel + PiecesPanel + ValidationPanel ------ */
+
+.right-stack .properties-panel {
+  /* No longer pinned to a fixed share — when an architectural
+     object is selected, the form takes the space it needs and the
+     pieces list below adapts. */
+  flex: 0 0 auto;
+  max-height: 40%;
+  overflow-y: auto;
+  border-bottom: 1px solid var(--border);
+}
+
+.right-stack .pieces-panel {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.right-stack .validation-panel {
+  flex: 0 0 auto;
+  max-height: 40%;
+  border-top: 1px solid var(--border);
+}
+
+/* --- canvas cursor by mode --------------------------------------------- */
+
+.canvas-mode-doorway,
+.canvas-mode-column,
+.canvas-mode-guide_line,
+.canvas-mode-add_seam {
+  cursor: crosshair;
+}
+
+.canvas-mode-doorway:active,
+.canvas-mode-column:active,
+.canvas-mode-guide_line:active,
+.canvas-mode-add_seam:active {
+  cursor: crosshair;
+}
+
+/* --- properties panel: new sections (seam + piece) --------------------- */
+
+.pp-row-static {
+  align-items: baseline;
+}
+
+.pp-row-static > span {
+  flex: 1 1 auto;
+  font-size: 12px;
+  color: var(--text);
+}
+
+.pp-mono {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+.pp-affected {
+  font-size: 12px;
+  color: var(--text);
+}
+
+.pp-affected code {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 11px;
+  background: var(--bg);
+  padding: 1px 4px;
+  border-radius: 3px;
+  margin-left: 4px;
+}
+
+/* Validity-driven badge row in the piece form. */
+.pp-row-badges {
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.pp-row-badges > label {
+  display: none;
+}
+
+.pp-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.pp-badge-info {
+  background: #e6f0fb;
+  color: #1a4380;
+}
+
+.pp-badge-warn {
+  background: #fff4d6;
+  color: #6a5500;
+}
+
+.pp-row-callout {
+  display: block;
+  background: #fff4d6;
+  border: 1px solid #d18b00;
+  border-radius: 4px;
+  padding: 8px 10px;
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: #6a5500;
+}
+
+.pp-row-callout strong {
+  color: #1c1c1f;
+}
+
+.pp-row-notes {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+}
+
+.pp-row-notes label {
+  margin-bottom: 2px;
+}
+
+.pp-row-notes ul {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.pp-row-notes li {
+  font-size: 11.5px;
+  margin-bottom: 2px;
+}
+
+.pp-row-notes code {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 11px;
+}
+
+/* --- validation panel: more breathing room ----------------------------- */
+
+.vp-summary {
+  padding: 14px 16px;
+  gap: 14px;
+}
+
+.vp-summary-badge {
+  padding: 10px 14px;
+  font-size: 13px;
+}
+
+.vp-summary-meta {
+  font-size: 11.5px;
+  gap: 4px 14px;
+}
+
+.vp-rule {
+  padding: 10px 16px;
+}
+
+.vp-rule-head {
+  gap: 10px;
+  margin-bottom: 5px;
+}
+
+.vp-rule-msg {
+  line-height: 1.4;
+}
+
+.vp-rule-affected {
+  margin-top: 6px;
+}
+
+/* =========================================================================
+ * 4-step wizard (0.1.39)
+ *
+ * StepperHeader at the top, replaces the old app-header. Each step has
+ * a chip with number, title, and caption; chips for unreached steps
+ * are visibly muted and disabled. Active step is highlighted with the
+ * primary accent. Step panels (1, 3) sit in a centered max-width
+ * column with a vertical stack of cards. Step 4 reuses the existing
+ * canvas-and-panel grid with an Export bar above the pieces list.
+ * ========================================================================= */
+
+.stepper-header {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  padding: 10px 20px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  flex: 0 0 auto;
+}
+.stepper-brand {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text);
+  letter-spacing: 0.2px;
+  margin-right: 8px;
+}
+.stepper-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  /* 0.1.45 — don't grow; the "Start new project" button to the
+   * right of this list uses ``margin-left: auto`` to push itself
+   * to the header's right edge, and that only works if the list
+   * doesn't claim all the remaining space. */
+  flex: 0 1 auto;
+}
+.stepper-item {
+  display: flex;
+  align-items: center;
+}
+.stepper-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 12px;
+  border-radius: 10px;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+.stepper-chip:disabled,
+.stepper-chip-blocked {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.stepper-chip-current {
+  background: rgba(70, 130, 220, 0.12);
+  border-color: rgba(70, 130, 220, 0.35);
+  color: var(--text);
+}
+.stepper-chip-done {
+  color: var(--text);
+}
+.stepper-chip-num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.08);
+  font-weight: 700;
+  font-size: 11px;
+  color: var(--text);
+}
+.stepper-chip-current .stepper-chip-num {
+  background: #2a5d8a;
+  color: white;
+}
+.stepper-chip-done .stepper-chip-num {
+  background: #1f7a1f;
+  color: white;
+}
+.stepper-chip-body {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  line-height: 1.2;
+}
+.stepper-chip-title {
+  font-weight: 600;
+  font-size: 12px;
+}
+.stepper-chip-caption {
+  font-size: 10px;
+  color: var(--muted);
+}
+.stepper-connector {
+  display: inline-block;
+  width: 32px;
+  height: 1px;
+  background: var(--border);
+  margin: 0 8px;
+}
+.stepper-connector-done {
+  background: #1f7a1f;
+}
+
+/* 0.1.45 — "Start new project" affordance on the right of the
+ * stepper header. Subtle border-only button so it doesn't compete
+ * with the active-step accent. Confirms before destroying work
+ * (App owns the prompt). */
+.stepper-reset-btn {
+  margin-left: auto;
+  padding: 5px 12px;
+  font-size: 12px;
+  color: var(--muted);
+  background: white;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+}
+.stepper-reset-btn:hover {
+  color: #b00020;
+  border-color: rgba(176, 0, 32, 0.4);
+}
+
+/* 0.1.51 — "Help" button. Sits to the LEFT of "Start new project"
+ * in the header. Same visual weight as the reset button so neither
+ * dominates; hover shifts toward the editor's primary blue so it
+ * reads as "open something" rather than "destructive". */
+.stepper-help-btn {
+  margin-left: 4px;
+  padding: 5px 12px;
+  font-size: 12px;
+  color: var(--muted);
+  background: white;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+}
+.stepper-help-btn:hover {
+  color: #2050a0;
+  border-color: rgba(32, 80, 160, 0.4);
+}
+
+/* =========================================================================
+ * Help modal (0.1.51) — full-screen backdrop + centred dialog.
+ * RTL is applied via ``dir="rtl"`` on the dialog itself so text
+ * alignment and bullet positions flip automatically.
+ * ========================================================================= */
+
+.help-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 24px;
+}
+
+.help-modal {
+  background: white;
+  border-radius: 10px;
+  width: 100%;
+  max-width: 720px;
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 24px 48px rgba(0, 0, 0, 0.18);
+  overflow: hidden;
+}
+
+/* Title strip: stays pinned while the body scrolls. */
+.help-modal-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--border);
+  background: #fafafa;
+  flex: 0 0 auto;
+}
+.help-modal-title {
+  font-size: 16px;
+  margin: 0;
+  font-weight: 700;
+  color: var(--text);
+  flex: 1 1 auto;
+  /* Allow long Farsi titles to wrap without breaking the toggle. */
+  min-width: 0;
+}
+.help-modal-lang {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.help-modal-lang-btn {
+  padding: 4px 10px;
+  font-size: 12px;
+  background: white;
+  border: none;
+  cursor: pointer;
+  color: var(--muted);
+  /* Always render the language label in its own script — Latin
+   * for English, Persian for فارسی — regardless of the rest of
+   * the modal's direction. */
+}
+.help-modal-lang-btn + .help-modal-lang-btn {
+  border-left: 1px solid var(--border);
+}
+.help-modal-lang-btn-active {
+  background: #2050a0;
+  color: white;
+  font-weight: 600;
+}
+.help-modal-close {
+  width: 28px;
+  height: 28px;
+  border: none;
+  background: transparent;
+  border-radius: 4px;
+  font-size: 22px;
+  line-height: 1;
+  cursor: pointer;
+  color: var(--muted);
+}
+.help-modal-close:hover {
+  background: rgba(0, 0, 0, 0.06);
+  color: var(--text);
+}
+
+/* Scrollable body. */
+.help-modal-body {
+  padding: 16px 24px 8px 24px;
+  overflow-y: auto;
+  flex: 1 1 auto;
+  line-height: 1.55;
+  color: var(--text);
+}
+.help-modal-intro {
+  font-size: 13px;
+  color: var(--muted);
+  margin: 0 0 16px 0;
+}
+.help-modal-section + .help-modal-section {
+  margin-top: 16px;
+}
+.help-modal-h3 {
+  font-size: 14px;
+  margin: 14px 0 6px 0;
+  color: var(--text);
+  font-weight: 700;
+}
+.help-modal-p {
+  margin: 6px 0;
+  font-size: 13px;
+}
+.help-modal-list-block {
+  margin: 8px 0;
+}
+.help-modal-list-intro {
+  margin: 4px 0 2px 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+.help-modal-ul,
+.help-modal-ol {
+  margin: 0 0 0 18px;
+  padding-left: 4px;
+  font-size: 13px;
+}
+/* In RTL mode lists hang on the right side. */
+.help-modal[dir="rtl"] .help-modal-ul,
+.help-modal[dir="rtl"] .help-modal-ol {
+  margin: 0 18px 0 0;
+  padding-right: 4px;
+  padding-left: 0;
+}
+
+/* Footer with the version label. */
+.help-modal-foot {
+  padding: 10px 20px;
+  border-top: 1px solid var(--border);
+  background: #fafafa;
+  flex: 0 0 auto;
+  display: flex;
+  justify-content: flex-end;
+}
+.help-modal-version {
+  font-size: 11px;
+  color: var(--muted);
+}
+/* On narrow viewports (tablets) the modal fills the screen so all
+ * scroll affordances are reachable with one thumb. */
+@media (max-width: 720px) {
+  .help-modal-backdrop { padding: 0; }
+  .help-modal {
+    max-height: 100vh;
+    height: 100%;
+    border-radius: 0;
+  }
+}
+
+/* --- step panels (1 & 3) — centered vertical column --- */
+
+.step-panel {
+  /* Centered column with the same max-width as before, BUT now
+   * scrollable on its own. ``.app`` is ``height: 100vh; overflow:
+   * hidden`` (set by the smoothness milestone) which means body
+   * scroll is suppressed — without ``overflow-y: auto`` here the
+   * bottom of long step panels (Step 3 with the upload preview
+   * table + working-slab card + Continue button) would be
+   * unreachable. ``flex: 1`` + ``min-height: 0`` lets the panel
+   * claim whatever vertical space is left under the stepper
+   * header, and ``overscroll-behavior: contain`` keeps scroll
+   * gestures inside the panel. */
+  width: 100%;
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 32px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.step-panel-intro {
+  margin-bottom: 4px;
+}
+.step-panel-title {
+  font-size: 20px;
+  margin: 0 0 4px 0;
+  font-weight: 700;
+  color: var(--text);
+}
+.step-panel-caption {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.step-panel-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.step-panel-card-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+.step-panel-file-input {
+  display: none;
+}
+.step-panel-btn {
+  align-self: flex-start;
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  background: white;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text);
+}
+.step-panel-btn:hover {
+  border-color: rgba(70, 130, 220, 0.5);
+}
+.step-panel-file-status {
+  font-size: 12px;
+  color: var(--text);
+}
+.step-panel-file-note {
+  color: var(--muted);
+  font-style: italic;
+  margin-left: 4px;
+}
+.step-panel-empty {
+  color: var(--muted);
+  font-size: 12px;
+}
+.step-panel-error {
+  color: #b00020;
+  font-size: 12px;
+}
+.step-panel-samples {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.step-panel-sample {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: white;
+  cursor: pointer;
+  text-align: left;
+}
+.step-panel-sample:hover {
+  border-color: rgba(70, 130, 220, 0.5);
+}
+.step-panel-sample-active {
+  border-color: rgba(70, 130, 220, 0.6);
+  background: rgba(70, 130, 220, 0.08);
+}
+.step-panel-sample-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+.step-panel-sample-id {
+  font-size: 10px;
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.step-panel-info-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 12px;
+  padding: 4px 0;
+}
+.step-panel-info-label {
+  flex: 0 0 140px;
+  color: var(--muted);
+}
+.step-panel-info-value {
+  color: var(--text);
+  font-weight: 500;
+}
+.step-panel-info-warn {
+  color: #b00020;
+}
+.step-panel-info-path {
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+}
+.step-panel-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 8px;
+}
+.step-panel-primary {
+  padding: 8px 16px;
+  background: #2a5d8a;
+  color: white;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+}
+.step-panel-primary:hover {
+  background: #234d72;
+}
+.step-panel-primary:disabled {
+  background: #94a4b3;
+  cursor: not-allowed;
+}
+
+/* --- step "next" bar (used inside Step 2 + Step 4 right stacks) --- */
+.step-next-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--border);
+  background: var(--panel);
+}
+.step-next-hint {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+/* --- Step 4 export bar --- */
+.step4-export-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+}
+.step4-export-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+.step4-export-counts strong {
+  font-size: 13px;
+  color: var(--text);
+}
+.step4-export-pill {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+.step4-export-pill-ok {
+  background: rgba(34, 139, 34, 0.15);
+  color: #1f7a1f;
+}
+.step4-export-pill-warn {
+  background: rgba(218, 165, 32, 0.18);
+  color: #8a6300;
+}
+.step4-export-pill-critical {
+  background: rgba(176, 0, 32, 0.15);
+  color: #b00020;
+}
+.step4-export-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+/* 0.1.46 — visual legend keying the canvas piece fills to
+ * assignment status. Sits between the status pills and the
+ * action buttons so the designer can decode the layout at a
+ * glance without hunting through the pieces list. */
+.step4-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  font-size: 10px;
+  color: var(--muted);
+  padding-top: 4px;
+}
+.step4-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.step4-legend-swatch {
+  width: 12px;
+  height: 12px;
+  border-radius: 2px;
+  border: 1px solid var(--border);
+  display: inline-block;
+}
+.step4-legend-photo {
+  /* Image-fill pieces look like the real slab — no swatch colour
+   * captures that, so show a checker-pattern hint. */
+  background-image:
+    linear-gradient(45deg, #cbd6e2 25%, transparent 25%),
+    linear-gradient(-45deg, #cbd6e2 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, #cbd6e2 75%),
+    linear-gradient(-45deg, transparent 75%, #cbd6e2 75%);
+  background-size: 6px 6px;
+  background-position: 0 0, 0 3px, 3px -3px, -3px 0;
+}
+.step4-legend-nophoto {
+  background: rgba(34, 139, 34, 0.18);
+  border-color: rgba(34, 139, 34, 0.45);
+}
+.step4-legend-unassigned {
+  background: #fafafa;
+}
+.step4-legend-nomatch {
+  background: rgba(176, 0, 32, 0.15);
+  border-color: rgba(176, 0, 32, 0.5);
+}
+.step4-legend-duplicate {
+  background: rgba(218, 165, 32, 0.18);
+  border-color: rgba(218, 165, 32, 0.55);
+}
+
+/* Inventory-utilisation debug line above the legend.
+ * "Inventory 15 valid · 12 unused — N pieces could still be filled" */
+.step4-export-debug {
+  font-size: 11px;
+  color: var(--muted);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding-top: 2px;
+}
+.step4-export-debug strong {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.step4-export-debug-hint {
+  color: #8a6300;
+  font-style: italic;
+}
+
+/* 0.1.50 — single-line export status line below the action row.
+ * Stays visible until the next export attempt clears it. */
+.step4-export-msg {
+  padding: 6px 10px;
+  border-radius: 4px;
+  font-size: 12px;
+  margin-top: 6px;
+}
+.step4-export-msg-ok {
+  background: rgba(34, 139, 34, 0.12);
+  color: #1f7a1f;
+}
+.step4-export-msg-err {
+  background: rgba(176, 0, 32, 0.1);
+  color: #b00020;
+}
+
+/* 0.1.52 — image-readiness helper text under the export buttons.
+ * Two variants: the in-flight "Preparing slab images… 3/8" message
+ * (neutral, no alarm) and the "some failed" warning (amber). */
+.step4-readiness {
+  margin-top: 6px;
+  padding: 4px 10px;
+  border-radius: 4px;
+  font-size: 12px;
+}
+.step4-readiness-pending {
+  background: rgba(70, 130, 220, 0.08);
+  color: #2050a0;
+}
+.step4-readiness-err {
+  background: rgba(218, 165, 32, 0.18);
+  color: #8a6300;
+}
+
+/* Generating-PNG overlay. Full-viewport so repeat clicks on the
+ * export button physically can't reach it through the backdrop;
+ * card centred in the middle of the screen. */
+.exporting-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(255, 255, 255, 0.7);
+  backdrop-filter: blur(2px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1100;
+}
+.exporting-overlay-card {
+  background: white;
+  padding: 18px 28px;
+  border-radius: 8px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.12);
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-width: 280px;
+}
+.exporting-overlay-spinner {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 3px solid rgba(32, 80, 160, 0.18);
+  border-top-color: #2050a0;
+  animation: exporting-spin 0.8s linear infinite;
+  flex: 0 0 auto;
+}
+.exporting-overlay-msg {
+  font-size: 13px;
+  color: var(--text);
+}
+@keyframes exporting-spin {
+  to { transform: rotate(360deg); }
+}
+.step4-export-btn {
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  background: white;
+  border-radius: 6px;
+  font-size: 12px;
+  cursor: pointer;
+  color: var(--text);
+}
+.step4-export-btn-primary {
+  background: #2a5d8a;
+  color: white;
+  border-color: #2a5d8a;
+}
+.step4-export-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+/* --- Step 4 assignment surface inside PiecesPanel --- */
+.pieces-assign-bar {
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border);
+  background: rgba(0, 0, 0, 0.02);
+}
+.pieces-allow-dup {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text);
+  cursor: pointer;
+}
+.piece-assigned-card {
+  margin: 8px 0;
+  padding: 10px 12px;
+  border: 1px solid rgba(34, 139, 34, 0.35);
+  background: rgba(34, 139, 34, 0.06);
+  border-radius: 6px;
+}
+.piece-assigned-card-duplicate {
+  border-color: rgba(176, 0, 32, 0.4);
+  background: rgba(176, 0, 32, 0.06);
+}
+.piece-assigned-empty {
+  border-style: dashed;
+  border-color: var(--border);
+  background: transparent;
+}
+.piece-assigned-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: var(--text);
+  letter-spacing: 0.3px;
+}
+.piece-assigned-conflict {
+  font-size: 10px;
+  font-weight: 600;
+  color: #b00020;
+  text-transform: none;
+  letter-spacing: 0;
+}
+.piece-assigned-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 6px;
+}
+.piece-assigned-info {
+  flex: 1 1 auto;
+}
+.piece-assigned-id {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  color: var(--text);
+  font-weight: 600;
+}
+.piece-assigned-meta {
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 2px;
+}
+.piece-assigned-stale {
+  color: #8a6300;
+  font-style: italic;
+}
+.piece-assigned-none {
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 4px;
+  font-style: italic;
+}
+.piece-assigned-clear {
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  background: white;
+  border-radius: 4px;
+  font-size: 11px;
+  cursor: pointer;
+}
+.piece-slab-row-assigned {
+  background: rgba(34, 139, 34, 0.06);
+}
+.piece-slab-assign-btn {
+  padding: 2px 8px;
+  border: 1px solid #2a5d8a;
+  background: #2a5d8a;
+  color: white;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.piece-slab-current {
+  background: rgba(34, 139, 34, 0.15);
+  color: #1f7a1f;
+}
+.piece-slab-dup {
+  background: rgba(176, 0, 32, 0.15);
+  color: #b00020;
+}
+.piece-slab-material {
+  background: rgba(70, 130, 220, 0.12);
+  color: #2a5d8a;
+}
+
+/* Assignment status chips reused by the row badges */
+.assign-status-unassigned {
+  background: rgba(0, 0, 0, 0.08);
+  color: var(--muted);
+}
+.assign-status-assigned {
+  background: rgba(34, 139, 34, 0.15);
+  color: #1f7a1f;
+}
+.assign-status-nomatch {
+  background: rgba(176, 0, 32, 0.15);
+  color: #b00020;
+}
+.assign-status-duplicate {
+  background: rgba(176, 0, 32, 0.15);
+  color: #b00020;
+}
+
+/* =========================================================================
+ * Step 3 upload — additions for the real-upload milestone (0.1.43)
+ * ========================================================================= */
+.step-panel-card-subtitle {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--muted);
+  margin-top: 10px;
+}
+.step-panel-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.step-panel-info-mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+}
+.step-panel-info-ok {
+  color: #1f7a1f;
+}
+.step-panel-info-warn-soft {
+  color: #8a6300;
+}
+.step-panel-preview-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+  margin-top: 6px;
+}
+.step-panel-preview-table th,
+.step-panel-preview-table td {
+  text-align: left;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+}
+.step-panel-preview-table th {
+  color: var(--muted);
+  font-weight: 600;
+  text-transform: uppercase;
+  font-size: 10px;
+  letter-spacing: 0.3px;
+}
+.inventory-source-uploaded {
+  background: rgba(34, 100, 200, 0.18);
+  color: #1a4a9c;
+}
+
+/* Slab thumbnail in candidate rows / assigned-slab card */
+.piece-slab-thumb,
+.piece-assigned-thumb {
+  width: 32px;
+  height: 32px;
+  object-fit: cover;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  flex: 0 0 auto;
+}
+.piece-assigned-thumb {
+  width: 48px;
+  height: 48px;
+}
+
+/* Large slab photo at the top of the Properties panel when the
+ * selected piece is assigned. Sized to ~260 px wide (panel is
+ * 320 px) so the photo dominates without overflowing. The
+ * 4:3 aspect ratio matches typical slab photo crops. */
+.props-slab-photo {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  background: rgba(0, 0, 0, 0.02);
+}
+.props-slab-photo-img {
+  width: 100%;
+  height: 180px;
+  object-fit: cover;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: #f0f0f0;
+}
+.props-slab-photo-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  width: 100%;
+  height: 180px;
+  border-radius: 6px;
+  border: 1px dashed var(--border);
+  background: rgba(0, 0, 0, 0.03);
+  color: var(--muted);
+  text-align: center;
+  padding: 0 16px;
+  font-size: 12px;
+}
+.props-slab-photo-empty strong {
+  color: var(--text);
+  font-size: 13px;
+}
+.props-slab-photo-caption {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.props-slab-photo-id {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.props-slab-photo-meta {
+  font-size: 11px;
+  color: var(--muted);
+}
+.props-slab-photo-rotated {
+  color: #8a6300;
+  font-weight: 600;
+}
+.props-slab-photo-warn {
+  display: inline-block;
+  margin-top: 4px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: rgba(218, 165, 32, 0.18);
+  color: #8a6300;
+  font-size: 11px;
+  font-weight: 600;
+}
+.props-slab-photo-ok {
+  display: inline-block;
+  margin-top: 4px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: rgba(34, 139, 34, 0.15);
+  color: #1f7a1f;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+/* =========================================================================
+ * Editor cleanup (0.1.40)
+ *
+ * The right panel was mixing Properties, Validation, and Pieces with
+ * expanding cards — too noisy. The new structure is:
+ *   1. Properties card (SelectionProperties) — always at the top
+ *   2. Annotation edit form (PropertiesPanel) — only for doorway/
+ *      column/guide/seam
+ *   3. Compact validation summary (ValidationSummary)
+ *   4. Pieces list (PiecesPanel) — rows just toggle selection,
+ *      no inline expand
+ * ========================================================================= */
+
+/* --- Properties card (SelectionProperties) --- */
+.props-card {
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+  padding: 12px 16px;
+  flex: 0 0 auto;
+}
+.props-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+.props-card-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+.props-card-kind {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--muted);
+}
+.props-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.props-empty {
+  font-size: 12px;
+  color: var(--muted);
+  font-style: italic;
+}
+.props-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 12px;
+  padding: 2px 0;
+}
+.props-label {
+  flex: 0 0 88px;
+  color: var(--muted);
+}
+.props-value {
+  color: var(--text);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.props-mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+}
+/* Secondary detail next to a primary value — e.g. "20% (0.116 m²
+ * of slab)". Less weight than the main number so the eye lands on
+ * the percentage first. */
+.props-value-aux {
+  color: var(--muted);
+  font-size: 11px;
+}
+.props-badges {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.props-badge {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 8px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  background: rgba(0, 0, 0, 0.08);
+  color: var(--text);
+}
+.props-badge-critical {
+  background: rgba(176, 0, 32, 0.15);
+  color: #b00020;
+}
+.props-badge-warn {
+  background: rgba(218, 165, 32, 0.18);
+  color: #8a6300;
+}
+.props-badge-info {
+  background: rgba(70, 130, 220, 0.12);
+  color: #2a5d8a;
+}
+.props-badge-boundary {
+  background: rgba(0, 0, 0, 0.12);
+  color: var(--text);
+}
+.props-badge-match-no_match {
+  background: rgba(176, 0, 32, 0.15);
+  color: #b00020;
+}
+.props-badge-match-exact_fit {
+  background: rgba(34, 139, 34, 0.15);
+  color: #1f7a1f;
+}
+.props-badge-match-matched,
+.props-badge-match-multiple_options {
+  background: rgba(70, 130, 220, 0.12);
+  color: #2a5d8a;
+}
+.props-match-best {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+/* --- Compact ValidationSummary --- */
+.vs-strip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+  font-size: 12px;
+}
+.vs-strip-error {
+  background: rgba(176, 0, 32, 0.06);
+}
+.vs-label {
+  font-weight: 600;
+  color: var(--text);
+}
+.vs-empty {
+  color: var(--muted);
+  font-style: italic;
+  flex: 1 1 auto;
+}
+.vs-error {
+  color: #b00020;
+  flex: 1 1 auto;
+  font-size: 11px;
+}
+.vs-btn-sm {
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  background: white;
+  border-radius: 4px;
+  font-size: 11px;
+  cursor: pointer;
+}
+.vs-btn-sm:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.vs-card {
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.vs-card-valid { background: rgba(34, 139, 34, 0.04); }
+.vs-card-warning { background: rgba(218, 165, 32, 0.06); }
+.vs-card-error { background: rgba(176, 0, 32, 0.06); }
+.vs-card-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+}
+.vs-chip {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+}
+.vs-chip-valid {
+  background: rgba(34, 139, 34, 0.18);
+  color: #1f7a1f;
+}
+.vs-chip-warning {
+  background: rgba(218, 165, 32, 0.22);
+  color: #8a6300;
+}
+.vs-chip-error {
+  background: rgba(176, 0, 32, 0.2);
+  color: #b00020;
+}
+.vs-count, .vs-score {
+  color: var(--text);
+}
+.vs-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 6px;
+}
+.vs-top-issue {
+  display: flex;
+  gap: 8px;
+  font-size: 11px;
+  align-items: baseline;
+}
+.vs-top-issue-id {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--muted);
+  font-weight: 600;
+  flex: 0 0 auto;
+}
+.vs-top-issue-msg {
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.vs-toggle {
+  align-self: flex-start;
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 11px;
+  color: #2a5d8a;
+  cursor: pointer;
+  text-decoration: underline;
+}
+.vs-rule-list {
+  list-style: none;
+  margin: 6px 0 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.vs-rule {
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 11px;
+  background: white;
+}
+.vs-rule-violation { border-left: 3px solid #b00020; }
+.vs-rule-pass { border-left: 3px solid #1f7a1f; }
+.vs-rule-reward { border-left: 3px solid #2a5d8a; }
+.vs-rule-info, .vs-rule-not_applicable { border-left: 3px solid var(--border); }
+.vs-rule-head {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+}
+.vs-rule-id {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-weight: 600;
+}
+.vs-rule-status {
+  text-transform: uppercase;
+  font-size: 9px;
+  letter-spacing: 0.4px;
+  color: var(--muted);
+}
+.vs-rule-delta {
+  margin-left: auto;
+  color: var(--muted);
+}
+.vs-rule-msg {
+  color: var(--text);
+  margin-top: 2px;
+}
