@@ -3,6 +3,7 @@
 // URLs in both dev and prod — no hard-coded localhost references
 // leaking into the bundle.
 
+import { cutDimsForPiece } from "./pieceGeom";
 import type {
   DemoIndexResponse,
   DemoLayoutResponse,
@@ -191,12 +192,22 @@ export function postMatchInventory(
    *  lowest-waste slabs that every tile-uniform piece sees. */
   topK?: number,
 ): Promise<InventoryMatchResponse> {
+  // We send the polygon-derived CUT dimensions as the matcher's
+  // ``nominal_width_mm`` / ``nominal_height_mm`` request fields.
+  // Those field names predate this clarification — semantically the
+  // matcher wants "the size the slab must cover", which is the cut
+  // bbox, not the working-slab tile. Sending the nominal tile size
+  // for an edge clip would mark every slab as "no match" for what
+  // is actually a 10 × 20 cm strip.
   const body: Record<string, unknown> = {
-    pieces: pieces.map((p) => ({
-      piece_id: p.piece_id,
-      nominal_width_mm: p.nominal_width_mm,
-      nominal_height_mm: p.nominal_height_mm,
-    })),
+    pieces: pieces.map((p) => {
+      const cut = cutDimsForPiece(p);
+      return {
+        piece_id: p.piece_id,
+        nominal_width_mm: cut.width_mm,
+        nominal_height_mm: cut.height_mm,
+      };
+    }),
     allow_rotation: allowRotation,
   };
   if (typeof topK === "number" && topK > 0) {

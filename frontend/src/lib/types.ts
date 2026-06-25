@@ -8,10 +8,24 @@ export type Point = [number, number];
 export interface Piece {
   piece_id: string;
   zone_id: string;
+  /** Nominal grid coordinates — i.e. "where the full working slab
+   *  would sit if the floor were infinite". For edge clips, hole
+   *  splits, and absorbed-sliver merges these DO NOT describe the
+   *  cut piece; they're traceability fields ("which row/column did
+   *  this strip come from?"). Display + match + DXF export must
+   *  prefer the polygon-derived cut dims (see ``lib/pieceGeom``). */
   nominal_x_mm: number;
   nominal_y_mm: number;
   nominal_width_mm: number;
   nominal_height_mm: number;
+  /** Real cut dimensions — polygon bbox + signed area. Backend
+   *  populates these for every piece. Optional in the type to keep
+   *  cached payloads from before 0.1.54 readable; the helper in
+   *  ``lib/pieceGeom`` falls back to a polygon-derived computation
+   *  when these aren't present. */
+  bounding_width_mm?: number;
+  bounding_height_mm?: number;
+  actual_area_m2?: number;
   polygon: Point[];
   is_full_tile: boolean;
   is_edge_piece: boolean;

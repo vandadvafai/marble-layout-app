@@ -96,6 +96,128 @@ def test_each_demo_returns_a_layout(demo_id: str):
 
 
 # ---------------------------------------------------------------------------
+# Real cut dimensions — regression for the Step-4 "159 × 220 cm" bug.
+# Every emitted piece must carry polygon-derived bounding dims +
+# actual_area_m2, and edge clips must report SMALLER cut dims than
+# their nominal tile size. The factory DXF and the Step-4 properties
+# panel both rely on these fields.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("demo_id", list(DEMOS.keys()))
+def test_pieces_carry_real_cut_dims(demo_id: str):
+    """Every piece must expose ``bounding_width_mm``,
+    ``bounding_height_mm`` and ``actual_area_m2`` — these are the
+    fields the editor / matcher / DXF export read for real cut
+    sizes. The polygon bbox must also agree with the bounding
+    fields to within a millimetre (rounding tolerance)."""
+    r = client.get(f"/api/demo-layouts/{demo_id}")
+    assert r.status_code == 200, r.text
+    pieces = r.json()["layout"]["pieces"]
+    assert pieces, "demo produced no pieces"
+    for p in pieces:
+        assert "bounding_width_mm" in p, p
+        assert "bounding_height_mm" in p, p
+        assert "actual_area_m2" in p, p
+        # The bounding rect should match the polygon's bbox to mm
+        # precision — the serializer reads them from the engine,
+        # which derived them from the same polygon, so any mismatch
+        # is a regression worth catching.
+        xs = [pt[0] for pt in p["polygon"]]
+        ys = [pt[1] for pt in p["polygon"]]
+        poly_w = max(xs) - min(xs)
+        poly_h = max(ys) - min(ys)
+        assert abs(p["bounding_width_mm"] - poly_w) <= 1, (
+            f"bounding_width_mm disagrees with polygon bbox for "
+            f"{p['piece_id']}: {p['bounding_width_mm']} vs {poly_w}"
+        )
+        assert abs(p["bounding_height_mm"] - poly_h) <= 1, (
+            f"bounding_height_mm disagrees with polygon bbox for "
+            f"{p['piece_id']}: {p['bounding_height_mm']} vs {poly_h}"
+        )
+        # Sanity: for unmerged pieces, bounding must never exceed
+        # nominal — the polygon is a subset of the nominal grid cell
+        # (clipping or equal, never bigger). Absorbed-sliver merges
+        # ARE allowed to grow past the nominal rect (the polygon
+        # spans both the holder and the swallowed neighbour); skip
+        # those via the ``absorbed_sliver:`` note.
+        is_merged = any(
+            n.startswith("absorbed_sliver:") for n in p.get("notes", [])
+        )
+        if not is_merged:
+            assert p["bounding_width_mm"] <= p["nominal_width_mm"] + 1, p
+            assert p["bounding_height_mm"] <= p["nominal_height_mm"] + 1, p
+
+
+def test_edge_clip_strip_reports_smaller_than_nominal():
+    """REGRESSION for the Step-4 bug where the properties panel
+    showed a small strip as 159 × 220 cm (== the working slab
+    tile). The L-shape demo always produces at least one edge clip
+    near the L's concave corner where bounding < nominal. Failure
+    here would mean an edge strip is being labelled with the full
+    working-slab size — exactly the dangerous mislabel the bug
+    report flagged."""
+    r = client.get("/api/demo-layouts/l_shape")
+    assert r.status_code == 200
+    pieces = r.json()["layout"]["pieces"]
+    real_strips = [
+        p for p in pieces
+        if p["bounding_width_mm"] < p["nominal_width_mm"] - 1
+        or p["bounding_height_mm"] < p["nominal_height_mm"] - 1
+    ]
+    assert real_strips, (
+        "L-shape demo produced no clipped strips — either the demo "
+        "geometry changed or the serializer is reporting nominal dims "
+        "where it should report polygon bbox dims"
+    )
+    # Spot-check: the smallest strip must NOT be reported at the
+    # working-slab size. Picking the narrowest one as the canonical
+    # "tiny strip" the bug report screenshot showed.
+    smallest = min(
+        real_strips,
+        key=lambda p: p["bounding_width_mm"] * p["bounding_height_mm"],
+    )
+    assert smallest["bounding_width_mm"] < smallest["nominal_width_mm"] - 1 \
+        or smallest["bounding_height_mm"] < smallest["nominal_height_mm"] - 1
+    # And the actual_area_m2 must reflect the polygon, not the
+    # nominal rect, so the Properties panel's area row is accurate.
+    nominal_area_m2 = (
+        smallest["nominal_width_mm"] * smallest["nominal_height_mm"]
+    ) / 1_000_000.0
+    assert smallest["actual_area_m2"] < nominal_area_m2 - 0.01, (
+        f"actual_area_m2 for clipped piece {smallest['piece_id']} "
+        f"({smallest['actual_area_m2']} m²) is suspiciously close to "
+        f"the nominal area ({nominal_area_m2} m²)"
+    )
+
+
+def test_absorbed_sliver_reports_merged_dims():
+    """When a sliver is absorbed by a neighbour the merged piece's
+    polygon spans both. Its bounding rect must reflect the merged
+    geometry, not the holder's nominal tile. Skips quietly if the
+    active demo configuration produces no absorbed slivers."""
+    r = client.get("/api/demo-layouts/l_shape")
+    assert r.status_code == 200
+    pieces = r.json()["layout"]["pieces"]
+    holders = [
+        p for p in pieces
+        if any(n.startswith("absorbed_sliver:") for n in p.get("notes", []))
+    ]
+    if not holders:
+        pytest.skip("no absorbed-sliver holders in this demo's layout")
+    for h in holders:
+        # The merged polygon's bbox is at least as wide OR tall as
+        # the holder's nominal rect, because absorbing a neighbour
+        # always extends in one direction.
+        wider = h["bounding_width_mm"] > h["nominal_width_mm"] + 1
+        taller = h["bounding_height_mm"] > h["nominal_height_mm"] + 1
+        assert wider or taller, (
+            f"absorbed-sliver holder {h['piece_id']} reports its "
+            f"nominal tile size; expected merged geometry"
+        )
+
+
+# ---------------------------------------------------------------------------
 # POST /api/demo-layouts/{demo_id}/validate
 # ---------------------------------------------------------------------------
 
@@ -863,6 +985,51 @@ def test_export_dxf_contains_piece_and_slab_labels():
     assert "p2" in text_strings
     assert slab_a in text_strings
     assert slab_b in text_strings
+
+
+def test_export_dxf_polygon_uses_request_geometry():
+    """REGRESSION for the Step-4 dimension bug — the cut polygons
+    landed in the DXF must match the polygons the request body sent
+    (the editor sends the polygon-derived bbox/area as ``cut`` dims
+    too, so the LWPOLYLINE we get out is the authoritative cut
+    geometry that the factory should follow). A 500 × 500 input
+    polygon must NOT be exported as a full working-slab tile."""
+    slab_a, slab_b = _two_slab_ids_for_assignment()
+    pieces = _two_piece_layout_pieces()
+    r = client.post(
+        "/api/demo-layouts/l_shape/export-dxf",
+        json={
+            "pieces": pieces,
+            "assignments": {"p1": slab_a, "p2": slab_b},
+        },
+    )
+    assert r.status_code == 200
+
+    import io
+    import ezdxf
+    doc = ezdxf.read(io.StringIO(r.content.decode("utf-8")))
+    msp = doc.modelspace()
+    cut_polygons = [
+        list(lw.vertices()) for lw in msp.query("LWPOLYLINE")
+        if lw.dxf.layer == "CUT_PIECES"
+    ]
+    # Two cut-piece polygons, one per request piece. Both should
+    # have a bbox of 500 × 500 mm — confirming the DXF reflects the
+    # REAL polygon, not a 1590 × 2200 working-slab tile.
+    assert len(cut_polygons) == 2
+    for verts in cut_polygons:
+        xs = [v[0] for v in verts]
+        ys = [v[1] for v in verts]
+        bbox_w = max(xs) - min(xs)
+        bbox_h = max(ys) - min(ys)
+        assert abs(bbox_w - 500.0) < 1.0, (
+            f"DXF cut piece bbox width = {bbox_w} mm, expected ~500 — "
+            "the factory would cut the wrong size"
+        )
+        assert abs(bbox_h - 500.0) < 1.0, (
+            f"DXF cut piece bbox height = {bbox_h} mm, expected ~500 — "
+            "the factory would cut the wrong size"
+        )
 
 
 def test_match_inventory_top_k_returns_more_candidates():

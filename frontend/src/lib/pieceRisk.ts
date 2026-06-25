@@ -32,6 +32,7 @@
 // Each risk also pushes a chip onto the row's badges so a designer
 // scanning the panel sees WHY a piece sorted high without expanding it.
 
+import { cutDimsForPiece } from "./pieceGeom";
 import type {
   InventoryMatchResponse, Layout, Piece, PieceMatchResult,
   ValidationResult,
@@ -99,10 +100,14 @@ export function computePieceRisk(
   // 1) Below R1 minimum. Read directly from the validation report
   //    when available; fall back to dimension check so a freshly
   //    loaded layout still surfaces critical risks.
+  //    Use the REAL cut dims (polygon bbox), not the nominal tile
+  //    size — an edge clip can be far below the R1 threshold even
+  //    when its nominal rect is comfortably above it.
   const pe = validation?.pieces.find((p) => p.piece_id === piece.piece_id);
+  const realCut = cutDimsForPiece(piece);
   const isBelowMin = pe?.is_below_min
-    || piece.nominal_width_mm < R1_THRESHOLD_MM
-    || piece.nominal_height_mm < R1_THRESHOLD_MM;
+    || realCut.width_mm < R1_THRESHOLD_MM
+    || realCut.height_mm < R1_THRESHOLD_MM;
   if (isBelowMin) {
     badges.push({ label: "< 10 cm", variant: "critical" });
     score = Math.max(score, 100);
@@ -141,8 +146,8 @@ export function computePieceRisk(
   //    not all oversized pieces have absorbed slivers.
   const tileW = layout.grid.tile_width_mm;
   const tileH = layout.grid.tile_height_mm;
-  const oversized = piece.nominal_width_mm > tileW + DIM_TOLERANCE_MM
-    || piece.nominal_height_mm > tileH + DIM_TOLERANCE_MM;
+  const oversized = realCut.width_mm > tileW + DIM_TOLERANCE_MM
+    || realCut.height_mm > tileH + DIM_TOLERANCE_MM;
   if (oversized) {
     badges.push({ label: "oversized slab", variant: "warn" });
     score = Math.max(score, 40);

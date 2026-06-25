@@ -12,6 +12,7 @@
 // owns DXF generation (uses ezdxf) so this side stays simple.
 
 import { preloadSlabImages } from "./imageReadiness";
+import { cutDimsForPiece } from "./pieceGeom";
 import type { Assignments, Piece } from "./types";
 
 
@@ -202,13 +203,22 @@ export async function exportFactoryDxf(
   doorways: Array<[[number, number], [number, number]]> = [],
   seams: Array<[[number, number], [number, number]]> = [],
 ): Promise<{ ok: true; filename: string } | { ok: false; error: string }> {
+  // Send polygon-derived REAL cut dimensions in the request's
+  // ``nominal_width_mm`` / ``nominal_height_mm`` fields. The field
+  // names predate this clarification — semantically these are
+  // "the size the cutter must produce" (== polygon bbox), not the
+  // working-slab tile size. Without this fix, an edge-clipped strip
+  // would land on the factory DXF labelled with the full tile size.
   const body = {
-    pieces: pieces.map((p) => ({
-      piece_id: p.piece_id,
-      polygon: p.polygon,
-      nominal_width_mm: p.nominal_width_mm,
-      nominal_height_mm: p.nominal_height_mm,
-    })),
+    pieces: pieces.map((p) => {
+      const cut = cutDimsForPiece(p);
+      return {
+        piece_id: p.piece_id,
+        polygon: p.polygon,
+        nominal_width_mm: cut.width_mm,
+        nominal_height_mm: cut.height_mm,
+      };
+    }),
     assignments,
     doorways,
     seams,

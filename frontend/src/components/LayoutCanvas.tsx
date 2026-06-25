@@ -41,6 +41,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { applySeamMove, resolveTargetPosition } from "../lib/editing";
+import { bboxFromPolygon, cutDimsForPiece } from "../lib/pieceGeom";
 import {
   MIN_DRAW_LENGTH_MM, rectanglePolygon,
 } from "../lib/planEdits";
@@ -403,17 +404,17 @@ export default function LayoutCanvas({
     [mode, onSelect, swapMode, onSwapAssignments],
   );
 
-  // Hit-test which piece's nominal bbox contains the given mm point.
-  // Pieces in the current build are always axis-aligned rectangles
-  // anchored at (nominal_x_mm, nominal_y_mm); a bbox test is exact.
+  // Hit-test which piece's REAL polygon bbox contains the given mm
+  // point. Reading the polygon (rather than the nominal rect) makes
+  // the swap drop target track edge-clipped strips correctly — a
+  // piece's nominal bbox can extend into empty space beyond its cut.
   // Returns null when the cursor is over empty floor space.
   const pieceAtPoint = useCallback((pt: Point): string | null => {
     for (const p of pieces) {
-      const x0 = p.nominal_x_mm;
-      const y0 = p.nominal_y_mm;
-      const x1 = x0 + p.nominal_width_mm;
-      const y1 = y0 + p.nominal_height_mm;
-      if (pt[0] >= x0 && pt[0] <= x1 && pt[1] >= y0 && pt[1] <= y1) {
+      const bb = bboxFromPolygon(p.polygon);
+      if (!bb) continue;
+      if (pt[0] >= bb.x0 && pt[0] <= bb.x1
+          && pt[1] >= bb.y0 && pt[1] <= bb.y1) {
         return p.piece_id;
       }
     }
@@ -853,8 +854,16 @@ export default function LayoutCanvas({
           {selectedPieceId && (() => {
             const sp = pieces.find((p) => p.piece_id === selectedPieceId);
             if (!sp) return null;
-            const cx = sp.nominal_x_mm + sp.nominal_width_mm / 2;
-            const cy = sp.nominal_y_mm + sp.nominal_height_mm / 2;
+            // Anchor the label to the REAL polygon centre — for edge
+            // clips the nominal centre sits outside the visible shape
+            // and the label would float over empty floor space.
+            const bb = bboxFromPolygon(sp.polygon);
+            const cx = bb
+              ? (bb.x0 + bb.x1) / 2
+              : sp.nominal_x_mm + sp.nominal_width_mm / 2;
+            const cy = bb
+              ? (bb.y0 + bb.y1) / 2
+              : sp.nominal_y_mm + sp.nominal_height_mm / 2;
             return (
               <g transform={`translate(${cx} ${cy}) scale(1 -1)`}>
                 <text
@@ -1360,10 +1369,13 @@ function ptsToString(pts: Point[]): string {
 }
 
 /** "159 × 220 cm" style label for a piece — used by the live seam
- *  HUD so the designer sees the resulting slab size while dragging. */
+ *  HUD so the designer sees the resulting slab size while dragging.
+ *  Reads from the polygon (real cut bbox) so edge-clipped strips
+ *  show their real width instead of the working slab size. */
 function pieceDimLabel(piece: Piece): string {
-  const w = (piece.nominal_width_mm / 10).toFixed(0);
-  const h = (piece.nominal_height_mm / 10).toFixed(0);
+  const cut = cutDimsForPiece(piece);
+  const w = (cut.width_mm / 10).toFixed(0);
+  const h = (cut.height_mm / 10).toFixed(0);
   return `${w} × ${h} cm`;
 }
 

@@ -18,6 +18,7 @@
 
 import { memo, useEffect, useState } from "react";
 
+import { cutDimsForPiece } from "../lib/pieceGeom";
 import { computePieceRisk } from "../lib/pieceRisk";
 import type {
   EditorMode, InventoryMatchResponse, Layout, Piece, PieceMatchResult,
@@ -138,11 +139,14 @@ function PieceBody({
   inventoryMatch: InventoryMatchResponse | null;
   assignedSlabId: string | null;
 }) {
-  const wCm = (piece.nominal_width_mm / 10).toFixed(1);
-  const hCm = (piece.nominal_height_mm / 10).toFixed(1);
-  const areaM2 = (
-    (piece.nominal_width_mm * piece.nominal_height_mm) / 1_000_000
-  ).toFixed(3);
+  // Real cut dimensions come from the polygon, NOT the nominal grid
+  // tile — for edge clips / hole splits / absorbed slivers the
+  // polygon is much smaller than ``nominal_width × nominal_height``
+  // and that's the value the factory cuts to.
+  const cut = cutDimsForPiece(piece);
+  const wCm = (cut.width_mm / 10).toFixed(1);
+  const hCm = (cut.height_mm / 10).toFixed(1);
+  const areaM2 = cut.area_m2.toFixed(3);
   const match: PieceMatchResult | null = inventoryMatch
     ? inventoryMatch.pieces.find((pm) => pm.piece_id === piece.piece_id)
         ?? null

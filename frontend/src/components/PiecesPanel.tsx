@@ -25,6 +25,7 @@ import {
   assignmentStatusFor, assignmentStatusLabel,
   detectDuplicateSlabs, isSlabValidForPiece,
 } from "../lib/finalAssign";
+import { cutDimsForPiece } from "../lib/pieceGeom";
 import { sortPiecesByRisk } from "../lib/pieceRisk";
 import type {
   AssignmentStatus, Assignments, InventoryInfo, InventoryMatchResponse,
@@ -156,6 +157,9 @@ function PiecesPanelImpl({
         {sorted.map(({ piece, risk }) => {
           const isSelected = piece.piece_id === selectedPieceId;
           const match = matchByPieceId.get(piece.piece_id) ?? null;
+          // Use real cut dimensions (polygon bbox + shoelace area), NOT
+          // the nominal tile size — see lib/pieceGeom for the rationale.
+          const cut = cutDimsForPiece(piece);
           const assignmentStatus: AssignmentStatus | null = assignmentMode
             ? assignmentStatusFor(
                 piece.piece_id, assignments, match, duplicateSlabIds,
@@ -182,13 +186,10 @@ function PiecesPanelImpl({
                   {piece.piece_id}
                 </span>
                 <span className="piece-row-dims">
-                  {mmToCm(piece.nominal_width_mm)}×
-                  {mmToCm(piece.nominal_height_mm)} cm
+                  {mmToCm(cut.width_mm)}×{mmToCm(cut.height_mm)} cm
                 </span>
                 <span className="piece-row-area">
-                  {formatAreaM2(
-                    piece.nominal_width_mm * piece.nominal_height_mm,
-                  )} m²
+                  {cut.area_m2.toFixed(3)} m²
                 </span>
                 <span className="piece-row-badges">
                   {assignmentStatus && (
@@ -259,8 +260,14 @@ function PieceDetails({
   onAssignSlab?: (piece_id: string, slab_id: string) => void;
   onClearAssignment?: (piece_id: string) => void;
 }) {
-  const w = piece.nominal_width_mm;
-  const h = piece.nominal_height_mm;
+  // Real cut dims drive everything in this card: the dimension rows,
+  // the area, the "needs oversized slab" callout, and the AssignedSlabCard
+  // below. The nominal tile size lives on the piece for traceability
+  // ("which row/col did this strip come from?") but it is NOT what the
+  // factory cuts — see lib/pieceGeom.
+  const cut = cutDimsForPiece(piece);
+  const w = cut.width_mm;
+  const h = cut.height_mm;
   const isAbsorbed = (piece.notes || []).some((n) =>
     n.startsWith("absorbed_sliver:"),
   );
@@ -275,7 +282,7 @@ function PieceDetails({
         <DetailRow label="Height" value={`${mmToCm(h)} cm`} />
         <DetailRow
           label="Area"
-          value={`${formatAreaM2(w * h)} m²`}
+          value={`${cut.area_m2.toFixed(3)} m²`}
         />
         <DetailRow label="Zone" value={piece.zone_id} mono />
         <DetailRow
@@ -674,12 +681,6 @@ function BadgeChip({ badge }: { badge: RiskBadge }) {
  *  truncate so a 1595 mm piece reads as 160 cm instead of 159 cm. */
 function mmToCm(mm: number): string {
   return String(Math.round(mm / 10));
-}
-
-/** Piece area mm² → m². Three decimals is enough for the editor;
- *  fabrication uses the full-precision value. */
-function formatAreaM2(areaMm2: number): string {
-  return (areaMm2 / 1_000_000).toFixed(3);
 }
 
 function AssignmentStatusChip({ status }: { status: AssignmentStatus }) {

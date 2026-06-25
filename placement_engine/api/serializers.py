@@ -40,6 +40,15 @@ def serialize_layout_for_editor(layout: LayoutResult) -> dict[str, Any]:
             "nominal_y_mm": p.nominal_y_mm,
             "nominal_width_mm": p.nominal_width_mm,
             "nominal_height_mm": p.nominal_height_mm,
+            # Real cut geometry — the polygon bbox + signed area. For
+            # full tiles these match the nominal rect; for edge clips,
+            # hole splits, and absorbed-sliver merges they are the
+            # values the factory actually cuts. The frontend prefers
+            # these over the nominal rect for every display + match +
+            # export site (see ``lib/pieceGeom.ts``).
+            "bounding_width_mm": p.bounding_width_mm,
+            "bounding_height_mm": p.bounding_height_mm,
+            "actual_area_m2": p.actual_area_m2,
             "polygon": [list(pt) for pt in (p.actual_cut_polygon or [])],
             "is_full_tile": p.is_full_tile,
             "is_edge_piece": p.is_edge_piece,
