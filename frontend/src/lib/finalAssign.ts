@@ -37,7 +37,21 @@ export function detectDuplicateSlabs(
 /** Resolve the assignment status for one piece. The matcher's
  *  per-piece result tells us whether ANY slab can cover the piece;
  *  combined with the current assignments table that gives us the
- *  four UX states. */
+ *  five UX states.
+ *
+ *  Validity check (0.1.53 — manual swap milestone): when a piece
+ *  has an assignment, we look up the slab in the matcher's
+ *  per-piece candidate list. The Step-4 matcher request asks for
+ *  the FULL inventory (top_k = max(32, valid_count)), so absence
+ *  from the candidate list means "this slab cannot cover this
+ *  piece" — i.e. a manual swap dropped a too-small slab on this
+ *  piece. The chip widens to ``too_small`` and the export bar
+ *  refuses to run until the swap is undone or rerouted.
+ *
+ *  ``duplicate`` wins over ``too_small`` when both apply — the
+ *  duplicate is the more recoverable conflict (one of the two
+ *  pieces is still legitimately holding it), so we surface that
+ *  first. */
 export function assignmentStatusFor(
   piece_id: string,
   assignments: Assignments,
@@ -46,10 +60,30 @@ export function assignmentStatusFor(
 ): AssignmentStatus {
   const assigned = assignments[piece_id];
   if (assigned) {
-    return duplicateSlabIds.has(assigned) ? "duplicate" : "assigned";
+    if (duplicateSlabIds.has(assigned)) return "duplicate";
+    if (match && !isSlabValidForPiece(assigned, match)) return "too_small";
+    return "assigned";
   }
   if (match && match.status === "no_match") return "no_match";
   return "unassigned";
+}
+
+/** True when the assigned slab appears in the matcher's candidate
+ *  list for this piece. Step 4 requests the full inventory so
+ *  candidates ≡ "slabs that can cover this piece"; an assigned
+ *  slab that is NOT in candidates is too small (or otherwise
+ *  geometrically unfit). When the matcher response is unavailable
+ *  (e.g. still in flight) we conservatively treat the assignment
+ *  as valid — flagging unknown-as-invalid would flicker chips on
+ *  every re-fetch. */
+export function isSlabValidForPiece(
+  slab_id: string, match: PieceMatchResult,
+): boolean {
+  if (!match.candidates || match.candidates.length === 0) return false;
+  for (const c of match.candidates) {
+    if (c.slab_id === slab_id) return true;
+  }
+  return false;
 }
 
 /** Human-readable label used in chips and dropdowns. Centralised so
@@ -59,6 +93,7 @@ export function assignmentStatusLabel(s: AssignmentStatus): string {
     unassigned: "unassigned",
     assigned: "assigned",
     no_match: "no matching slab",
+    too_small: "slab too small",
     duplicate: "duplicate slab",
   }[s];
 }
@@ -74,6 +109,24 @@ export function setAssignment(
   } else {
     next[piece_id] = slab_id;
   }
+  return next;
+}
+
+/** Swap the slab assignments of two pieces. Piece geometry,
+ *  measurements, cut dimensions, and absorbed-sliver flags live on
+ *  the ``Piece`` objects themselves and are NEVER touched by this
+ *  helper — only the (piece_id → slab_id) edge moves. Either side
+ *  may be unassigned (slab_id = undefined); in that case the
+ *  opposite side becomes unassigned after the swap. */
+export function swapAssignments(
+  current: Assignments, piece_a: string, piece_b: string,
+): Assignments {
+  if (piece_a === piece_b) return current;
+  const next: Assignments = { ...current };
+  const a = next[piece_a] ?? null;
+  const b = next[piece_b] ?? null;
+  if (b !== null) next[piece_a] = b; else delete next[piece_a];
+  if (a !== null) next[piece_b] = a; else delete next[piece_b];
   return next;
 }
 
@@ -174,12 +227,13 @@ export function summarizeAssignments(
   assigned: number;
   unassigned: number;
   no_match: number;
+  too_small: number;
   duplicate: number;
 } {
   const matchById = new Map<string, PieceMatchResult>();
   if (match) for (const pm of match.pieces) matchById.set(pm.piece_id, pm);
   const dupes = detectDuplicateSlabs(assignments, allowDuplicates);
-  let assigned = 0, unassigned = 0, no_match = 0, duplicate = 0;
+  let assigned = 0, unassigned = 0, no_match = 0, too_small = 0, duplicate = 0;
   for (const pid of piece_ids) {
     const s = assignmentStatusFor(
       pid, assignments, matchById.get(pid) ?? null, dupes,
@@ -187,10 +241,11 @@ export function summarizeAssignments(
     if (s === "assigned") assigned += 1;
     else if (s === "duplicate") duplicate += 1;
     else if (s === "no_match") no_match += 1;
+    else if (s === "too_small") too_small += 1;
     else unassigned += 1;
   }
   return {
     total: piece_ids.length,
-    assigned, unassigned, no_match, duplicate,
+    assigned, unassigned, no_match, too_small, duplicate,
   };
 }

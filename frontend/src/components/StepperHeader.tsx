@@ -25,6 +25,12 @@ interface Props {
    *  Computed by App so the stepper stays presentational. */
   completed: Record<WorkflowStep, boolean>;
   onChange: (step: WorkflowStep) => void;
+  /** Optional handler invoked when the designer clicks a chip whose
+   *  prerequisites aren't met. The App uses this to surface a banner
+   *  with ``gate.blockedReason`` (the chip's tooltip would otherwise
+   *  be the only feedback, which is easy to miss). When omitted the
+   *  blocked chip behaves like before — clicks are no-ops. */
+  onBlockedStep?: (step: WorkflowStep, reason: string) => void;
   /** 0.1.45 — "Start new project" handler. Always visible in the
    *  header so the designer can rewind no matter which step they're
    *  on. App owns the confirmation prompt + the actual reset. */
@@ -34,7 +40,8 @@ interface Props {
 }
 
 export default function StepperHeader({
-  current, gates, completed, onChange, onStartNewProject, onOpenHelp,
+  current, gates, completed, onChange, onBlockedStep,
+  onStartNewProject, onOpenHelp,
 }: Props) {
   // The Help button shows the label in the user's preferred
   // language so first-time visitors recognise it immediately. The
@@ -55,7 +62,11 @@ export default function StepperHeader({
               isCompleted={completed[step.id]}
               gate={gates[step.id]}
               onClick={() => {
-                if (gates[step.id].reached) onChange(step.id);
+                const g = gates[step.id];
+                if (g.reached) onChange(step.id);
+                else if (onBlockedStep && g.blockedReason) {
+                  onBlockedStep(step.id, g.blockedReason);
+                }
               }}
             />
             {idx < STEPS.length - 1 && (
@@ -110,7 +121,11 @@ function StepChip({
       type="button"
       className={cls}
       onClick={onClick}
-      disabled={!gate.reached}
+      // ``aria-disabled`` instead of ``disabled`` so the click still
+      // fires when the chip is blocked — App relays the blocked
+      // reason via onBlockedStep so the designer sees an explicit
+      // message instead of a silently inert button.
+      aria-disabled={!gate.reached}
       title={gate.blockedReason ?? `Step ${step.id} — ${step.title}`}
     >
       <span className="stepper-chip-num">

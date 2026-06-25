@@ -22,7 +22,8 @@
 import { memo, useMemo } from "react";
 
 import {
-  assignmentStatusFor, assignmentStatusLabel, detectDuplicateSlabs,
+  assignmentStatusFor, assignmentStatusLabel,
+  detectDuplicateSlabs, isSlabValidForPiece,
 } from "../lib/finalAssign";
 import { sortPiecesByRisk } from "../lib/pieceRisk";
 import type {
@@ -339,6 +340,13 @@ function PieceDetails({
             assignedSlabId !== null
             && duplicateSlabIds.has(assignedSlabId)
           }
+          isTooSmall={
+            assignedSlabId !== null
+            && match !== null
+            && !isSlabValidForPiece(assignedSlabId, match)
+          }
+          piece_width_mm={w}
+          piece_height_mm={h}
           onClear={() => onClearAssignment?.(piece.piece_id)}
         />
       )}
@@ -365,12 +373,16 @@ function PieceDetails({
 // ---------------------------------------------------------------------------
 
 function AssignedSlabCard({
-  piece_id, assignedSlabId, match, isDuplicate, onClear,
+  piece_id, assignedSlabId, match, isDuplicate, isTooSmall,
+  piece_width_mm, piece_height_mm, onClear,
 }: {
   piece_id: string;
   assignedSlabId: string | null;
   match: PieceMatchResult | null;
   isDuplicate: boolean;
+  isTooSmall: boolean;
+  piece_width_mm: number;
+  piece_height_mm: number;
   onClear: () => void;
 }) {
   if (!assignedSlabId) {
@@ -392,6 +404,7 @@ function AssignedSlabCard({
       className={
         "piece-assigned-card"
         + (isDuplicate ? " piece-assigned-card-duplicate" : "")
+        + (isTooSmall ? " piece-assigned-card-toosmall" : "")
       }
     >
       <div className="piece-assigned-label">
@@ -399,6 +412,12 @@ function AssignedSlabCard({
         {isDuplicate && (
           <span className="piece-assigned-conflict">
             also assigned elsewhere
+          </span>
+        )}
+        {isTooSmall && (
+          <span className="piece-assigned-conflict">
+            too small for {Math.round(piece_width_mm / 10)}×
+            {Math.round(piece_height_mm / 10)} cm piece
           </span>
         )}
       </div>
@@ -668,6 +687,7 @@ function AssignmentStatusChip({ status }: { status: AssignmentStatus }) {
     unassigned: "assign-status-unassigned",
     assigned: "assign-status-assigned",
     no_match: "assign-status-nomatch",
+    too_small: "assign-status-toosmall",
     duplicate: "assign-status-duplicate",
   }[status];
   return (

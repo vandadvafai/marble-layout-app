@@ -88,6 +88,18 @@ interface Props {
    *  all?" — answered by the matcher's per-candidate
    *  ``image_path`` field. */
   inventoryMatch?: InventoryMatchResponse | null;
+  /** 0.1.53 — Manual swap mode. When true (Step 4 only), pointer
+   *  interactions on pieces switch from "select" to "drag-to-swap":
+   *  pressing on Piece A and releasing on Piece B fires
+   *  ``onSwapAssignments(A.id, B.id)``. Piece geometry is never
+   *  mutated by the canvas — only the assignments map moves. */
+  swapMode?: boolean;
+  onSwapAssignments?: (piece_a_id: string, piece_b_id: string) => void;
+  /** Per-piece red-ring overlay used in Step 4 to flag pieces whose
+   *  current slab is too small (typical after a manual swap). The
+   *  canvas reads the set as a quick lookup; the source of truth is
+   *  ``assignmentStatusFor`` in ``lib/finalAssign``. Optional. */
+  invalidPieceIds?: Set<string>;
   onAddSeam: (args: {
     orientation: "vertical" | "horizontal";
     position: number;
@@ -172,6 +184,7 @@ export default function LayoutCanvas({
   onSelect, onSeamDragMove, onSeamDragEnd,
   onAddDoorway, onAddColumn, onAddGuideLine, onAddSeam,
   tileChoice, assignments, inventoryMatch,
+  swapMode = false, onSwapAssignments, invalidPieceIds,
 }: Props) {
   const initialBox = useMemo<Box>(() => {
     const [x0, y0, x1, y1] = layout.target.bbox;
@@ -188,6 +201,19 @@ export default function LayoutCanvas({
   const svgRef = useRef<SVGSVGElement | null>(null);
   const panState = useRef<{ startX: number; startY: number; startBox: Box } | null>(null);
   const seamDrag = useRef<{ seam: Seam; basePieces: Piece[] } | null>(null);
+  // 0.1.53 — manual swap drag. ``pointerId`` is the captured pointer
+  // so onPointerMove/Up on the SVG root receive events even when the
+  // cursor leaves the source polygon. ``pos`` is the latest pointer
+  // position in viewBox/mm coordinates — used both for the floating
+  // chip overlay and for hit-testing the drop target. ``hoverPieceId``
+  // is whichever piece the cursor is currently over (computed cheaply
+  // from the rectangular bbox of each piece).
+  const [swapDrag, setSwapDrag] = useState<{
+    fromPieceId: string;
+    pointerId: number;
+    pos: Point;
+    hoverPieceId: string | null;
+  } | null>(null);
   const [drawing, setDrawing] = useState<DrawingState | null>(null);
   // Track the currently-hovered seam so the canvas can highlight it
   // before the designer actually grabs it. Helps with the "I can't
@@ -343,18 +369,74 @@ export default function LayoutCanvas({
       // ambiguity this milestone is fixing.
       if (selection.kind === "piece") {
         if (mode !== "select_piece") return;
+        // 0.1.53 — Manual swap intercept. When the designer has
+        // toggled swap mode on, a press on a piece STARTS a drag
+        // (rather than selecting). The actual swap fires on
+        // pointer-up over the drop-target piece in onPointerUp.
+        if (swapMode && onSwapAssignments) {
+          if (!svgRef.current) return;
+          e.stopPropagation();
+          const pt = svgPoint(svgRef.current, e.clientX, e.clientY);
+          // Pointer capture on the SVG root so pointermove/up keep
+          // firing here even when the cursor leaves the source
+          // polygon (or drops over an inert area).
+          try {
+            svgRef.current.setPointerCapture(e.pointerId);
+          } catch { /* iOS may throw on a synthesised pointer */ }
+          setSwapDrag({
+            fromPieceId: selection.id,
+            pointerId: e.pointerId,
+            pos: pt,
+            hoverPieceId: selection.id,
+          });
+          // Still select the source piece so the properties panel
+          // shows context while the designer is mid-drag.
+          onSelect(selection);
+          return;
+        }
       } else if (!isSelectionMode(mode)) {
         return;
       }
       e.stopPropagation();
       onSelect(selection);
     },
-    [mode, onSelect],
+    [mode, onSelect, swapMode, onSwapAssignments],
   );
+
+  // Hit-test which piece's nominal bbox contains the given mm point.
+  // Pieces in the current build are always axis-aligned rectangles
+  // anchored at (nominal_x_mm, nominal_y_mm); a bbox test is exact.
+  // Returns null when the cursor is over empty floor space.
+  const pieceAtPoint = useCallback((pt: Point): string | null => {
+    for (const p of pieces) {
+      const x0 = p.nominal_x_mm;
+      const y0 = p.nominal_y_mm;
+      const x1 = x0 + p.nominal_width_mm;
+      const y1 = y0 + p.nominal_height_mm;
+      if (pt[0] >= x0 && pt[0] <= x1 && pt[1] >= y0 && pt[1] <= y1) {
+        return p.piece_id;
+      }
+    }
+    return null;
+  }, [pieces]);
 
   const onPointerMove = useCallback(
     (e: React.PointerEvent<SVGSVGElement>) => {
       if (!svgRef.current) return;
+      // 0.1.53 — manual swap drag. Update the floating chip position
+      // and the live hover target for visual feedback.
+      if (swapDrag) {
+        const pt = svgPoint(svgRef.current, e.clientX, e.clientY);
+        const hover = pieceAtPoint(pt);
+        // Only re-render when the hover target actually changes —
+        // pos updates every frame regardless because the chip
+        // tracks the cursor.
+        setSwapDrag((cur) => cur
+          ? { ...cur, pos: pt, hoverPieceId: hover }
+          : cur,
+        );
+        return;
+      }
       // Seam drag has top priority.
       const sd = seamDrag.current;
       if (sd) {
@@ -410,11 +492,31 @@ export default function LayoutCanvas({
         h: ps.startBox.h,
       });
     },
-    [drawing, onSeamDragMove],
+    [drawing, onSeamDragMove, swapDrag, pieceAtPoint],
   );
 
   const onPointerUp = useCallback(
     (e: React.PointerEvent<SVGSVGElement>) => {
+      // 0.1.53 — manual swap completion. Fire the swap if the drop
+      // landed on a different piece; otherwise treat as a click
+      // (no-op for assignments, source piece stays selected).
+      if (swapDrag && e.pointerId === swapDrag.pointerId) {
+        let dropPt: Point;
+        if (svgRef.current) {
+          dropPt = svgPoint(svgRef.current, e.clientX, e.clientY);
+        } else {
+          dropPt = swapDrag.pos;
+        }
+        const target = pieceAtPoint(dropPt);
+        if (target && target !== swapDrag.fromPieceId) {
+          onSwapAssignments?.(swapDrag.fromPieceId, target);
+        }
+        setSwapDrag(null);
+        try {
+          svgRef.current?.releasePointerCapture(e.pointerId);
+        } catch { /* already released */ }
+        return;
+      }
       const wasSeamDragging = seamDrag.current !== null;
       seamDrag.current = null;
       panState.current = null;
@@ -442,7 +544,8 @@ export default function LayoutCanvas({
 
       if (wasSeamDragging) onSeamDragEnd();
     },
-    [drawing, pieces, onAddColumn, onAddDoorway, onAddGuideLine, onAddSeam, onSeamDragEnd],
+    [drawing, pieces, onAddColumn, onAddDoorway, onAddGuideLine,
+     onAddSeam, onSeamDragEnd, swapDrag, pieceAtPoint, onSwapAssignments],
   );
 
   // Selection lookups for canvas highlight.
@@ -648,6 +751,19 @@ export default function LayoutCanvas({
             )?.status;
             const isDuplicateAssigned = !!assignedSlabId
               && (duplicateSlabIds?.has(assignedSlabId) ?? false);
+            // 0.1.53 — manual swap visuals + post-swap validation.
+            //   * ``isInvalidAssignment`` flags pieces whose current
+            //     slab is too small (chip + canvas ring stay red until
+            //     the conflict is resolved).
+            //   * ``isSwapSource`` / ``isSwapHover`` paint the in-flight
+            //     drag so the designer can see what they're moving
+            //     and where they'd drop it.
+            const isInvalidAssignment = invalidPieceIds?.has(p.piece_id)
+              ?? false;
+            const isSwapSource = swapDrag?.fromPieceId === p.piece_id;
+            const isSwapHover = swapDrag !== null
+              && swapDrag.hoverPieceId === p.piece_id
+              && swapDrag.fromPieceId !== p.piece_id;
             // Pick the tinted fill for the "assigned without photo"
             // and "no-match" and "duplicate" cases so the legend
             // chips in Step 4 line up with what the canvas shows.
@@ -671,13 +787,33 @@ export default function LayoutCanvas({
             // is for the default-state border only.
             const defaultEdge = mode === "edit_seam"
               ? STYLES.pieceEdgeMuted : STYLES.pieceEdge;
-            const stroke = isSelected
-              ? STYLES.selectedStroke
-              : isR1
-                ? STYLES.pieceFaceR1Edge
-                : isAbsorbed ? STYLES.pieceFaceAbsorbedEdge : defaultEdge;
-            const strokeWidth = isSelected
-              ? STYLES.selectedWidth : STYLES.pieceWidth;
+            // Stroke priority (most → least important):
+            //   1. invalid-after-swap red ring — must always be loud
+            //   2. swap-drag hover / source highlight
+            //   3. user selection
+            //   4. R1 / absorbed callouts
+            //   5. default edge
+            const stroke = isInvalidAssignment
+              ? STYLES.pieceFaceNoMatchEdge
+              : isSwapHover
+                ? STYLES.selectedStroke
+                : isSwapSource
+                  ? STYLES.selectedStroke
+                  : isSelected
+                    ? STYLES.selectedStroke
+                    : isR1
+                      ? STYLES.pieceFaceR1Edge
+                      : isAbsorbed
+                        ? STYLES.pieceFaceAbsorbedEdge
+                        : defaultEdge;
+            const strokeWidth = isInvalidAssignment
+              ? STYLES.selectedWidth
+              : (isSwapSource || isSwapHover || isSelected)
+                ? STYLES.selectedWidth
+                : STYLES.pieceWidth;
+            // Dashed border on the swap source so the designer can
+            // tell which piece they're dragging FROM at a glance.
+            const strokeDash = isSwapSource ? "6 6" : undefined;
             return (
               <polygon
                 key={`piece:${p.piece_id}`}
@@ -685,6 +821,7 @@ export default function LayoutCanvas({
                 fill={fill}
                 stroke={stroke}
                 strokeWidth={strokeWidth}
+                strokeDasharray={strokeDash}
                 vectorEffect="non-scaling-stroke"
                 style={{
                   // Pieces ONLY respond in select_piece mode. In
@@ -693,7 +830,11 @@ export default function LayoutCanvas({
                   // handle) and click events fall through to the
                   // canvas, which is exactly the spec ("editor
                   // should behave as if pieces do not exist").
-                  cursor: mode === "select_piece" ? "pointer" : "default",
+                  // Swap mode upgrades the cursor so the designer
+                  // can see that pieces are now draggable.
+                  cursor: mode === "select_piece"
+                    ? (swapMode ? "grab" : "pointer")
+                    : "default",
                   pointerEvents: mode === "select_piece" ? "auto" : "none",
                 }}
                 onPointerDown={(e) =>
@@ -983,6 +1124,29 @@ export default function LayoutCanvas({
             </span>
             <span className="seam-hud-value">{seamHud.rightLabel}</span>
           </div>
+        </div>
+      )}
+
+      {/* 0.1.53 — swap mode HUD. A persistent banner explains the
+          mode is active; while a drag is in flight, a status line
+          surfaces the source + drop-target so the designer can see
+          the operation before releasing the pointer. */}
+      {swapMode && (
+        <div className="swap-mode-banner" role="status">
+          <strong>Swap slabs</strong> · drag a piece onto another to
+          swap their assigned slabs
+          {swapDrag && (
+            <>
+              <span className="swap-mode-sep">·</span>
+              <span className="swap-mode-trace">
+                {swapDrag.fromPieceId}
+                {" → "}
+                {swapDrag.hoverPieceId && swapDrag.hoverPieceId !== swapDrag.fromPieceId
+                  ? swapDrag.hoverPieceId
+                  : "drop on another piece"}
+              </span>
+            </>
+          )}
         </div>
       )}
     </div>

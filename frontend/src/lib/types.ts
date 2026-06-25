@@ -394,11 +394,20 @@ export interface FinalizationState {
  *  a plain object so JSON round-trips through localStorage trivially. */
 export type Assignments = Record<string, string | null>;
 
-/** Per-piece status the panel surfaces in Step 4. */
+/** Per-piece status the panel surfaces in Step 4.
+ *
+ *  ``too_small`` (0.1.53 — manual swap milestone): the designer
+ *  assigned a slab to the piece, but the slab is not large enough
+ *  to cover the piece's nominal w × h (even after rotation when
+ *  rotation is allowed). Typically the result of a Manual-swap
+ *  drag that moved a smaller slab onto a larger piece. The chip
+ *  flags the conflict and the export bar refuses to fire until
+ *  every piece is back to a valid state. */
 export type AssignmentStatus =
   | "unassigned"
   | "assigned"
   | "no_match"
+  | "too_small"
   | "duplicate";
 
 // ---------------------------------------------------------------------------

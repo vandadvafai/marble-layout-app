@@ -122,11 +122,12 @@ export default function Step3InventoryPanel({
   };
 
   const hasValidSlabs = summary !== null && summary.valid_slabs > 0;
-  const continueEnabled = canContinue && (
-    // Either the designer uploaded something usable OR the
-    // fallback inventory is non-empty (info reports valid_count).
-    hasValidSlabs || (info !== null && info.valid_count > 0)
-  );
+  // Step 4 export now requires an explicit upload from the designer
+  // (the fallback inventory is sample data and must NOT be used to
+  // produce a factory cut plan). The gate above (``canContinue``) is
+  // the same predicate; we keep this local check so the tooltip can
+  // explain WHICH side is failing.
+  const continueEnabled = canContinue && hasValidSlabs;
 
   return (
     <div className="step-panel step-panel-3">
@@ -426,7 +427,7 @@ export default function Step3InventoryPanel({
           title={
             continueEnabled
               ? "Continue to slab assignment"
-              : "Upload at least one valid slab (or rely on the fallback)"
+              : "Upload at least one valid slab to continue"
           }
         >
           Continue to assignment →

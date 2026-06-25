@@ -60,13 +60,26 @@ export interface StepGate {
 export interface GateInputs {
   layout: Layout | null;
   finalization: FinalizationState | null;
+  /** True when the designer has uploaded a slab inventory in Step 3
+   *  that parsed, validated, and produced at least one usable slab.
+   *  The fallback (demo / real-export) inventory does NOT satisfy
+   *  this — Step 4 explicitly requires the designer's own upload to
+   *  avoid factory cut plans being produced from sample data. */
+  inventoryReady: boolean;
 }
+
+/** Single source of truth for the Step-4 lock message. Surfaced as
+ *  the chip tooltip AND the banner the App shows when the designer
+ *  clicks the blocked chip. */
+export const STEP4_BLOCKED_MESSAGE =
+  "Please complete Step 3: upload and validate slabs before "
+  + "assigning/exporting.";
 
 /** Per-step reachability gates. Step 1 is always reachable; Step 2
  *  needs a loaded layout (which the sample picker / future upload
  *  provides); Step 3 needs a finalized layout from Step 2; Step 4
- *  needs the same thing (the upload-slabs step is optional — the
- *  fallback inventory is always available). */
+ *  needs the same finalization PLUS a successful Step-3 upload with
+ *  at least one valid slab. */
 export function gateForStep(
   step: WorkflowStep, inputs: GateInputs,
 ): StepGate {
@@ -88,11 +101,15 @@ export function gateForStep(
             blockedReason: "Finalize the layout in Step 2 to continue.",
           };
     case 4:
-      return inputs.finalization !== null
-        ? { reached: true, blockedReason: null }
-        : {
-            reached: false,
-            blockedReason: "Finalize the layout in Step 2 to continue.",
-          };
+      if (inputs.finalization === null) {
+        return {
+          reached: false,
+          blockedReason: "Finalize the layout in Step 2 to continue.",
+        };
+      }
+      if (!inputs.inventoryReady) {
+        return { reached: false, blockedReason: STEP4_BLOCKED_MESSAGE };
+      }
+      return { reached: true, blockedReason: null };
   }
 }

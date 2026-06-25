@@ -15,6 +15,11 @@ interface Props {
   assigned: number;
   unassigned: number;
   noMatch: number;
+  /** 0.1.53 — assignments where the assigned slab is too small to
+   *  cover the piece (typical after a manual swap). The export bar
+   *  surfaces the count as its own pill and refuses to export until
+   *  the conflicts are resolved. */
+  tooSmall: number;
   duplicate: number;
   /** True when the matcher hasn't returned yet, or no slabs have
    *  any candidates — used to disable Auto-assign before it can do
@@ -44,16 +49,29 @@ interface Props {
     pending: number;
     isReady: boolean;
   };
+  /** 0.1.53 — manual-swap toggle. When ON the canvas piece pointer
+   *  handlers switch from "select" to "drag-to-swap"; the button
+   *  also turns into an active indicator in the bar. */
+  swapMode: boolean;
+  onToggleSwapMode: () => void;
 }
 
 function Step4ExportBarImpl({
-  total, assigned, unassigned, noMatch, duplicate,
+  total, assigned, unassigned, noMatch, tooSmall, duplicate,
   canAutoAssign, onAutoAssign, onClearAssignments,
   inventoryValidCount, inventoryUnusedCount,
   onExportPng, onExportDxf,
   imageReadiness,
+  swapMode, onToggleSwapMode,
 }: Props) {
-  const allAssigned = total > 0 && assigned === total && duplicate === 0;
+  // "Ready to export" requires every piece assigned, with no
+  // duplicate-slab conflicts AND no too-small-slab conflicts. The
+  // too-small check (0.1.53) is what catches a manual swap that
+  // dropped a smaller slab on a larger piece.
+  const allAssigned = total > 0
+    && assigned === total
+    && duplicate === 0
+    && tooSmall === 0;
   // 0.1.50 — disable export buttons until every piece has a slab
   // assigned AND no duplicate conflicts remain. ``allAssigned`` is
   // the same predicate that lights up the "ready to export" pill.
@@ -112,6 +130,14 @@ function Step4ExportBarImpl({
         {noMatch > 0 && (
           <span className="step4-export-pill step4-export-pill-critical">
             {noMatch} no match
+          </span>
+        )}
+        {tooSmall > 0 && (
+          <span
+            className="step4-export-pill step4-export-pill-critical"
+            title="Assigned slab is too small for the piece (resolve before exporting)"
+          >
+            {tooSmall} slab too small
           </span>
         )}
         {duplicate > 0 && (
@@ -192,6 +218,22 @@ function Step4ExportBarImpl({
         </button>
         <button
           type="button"
+          className={
+            "step4-export-btn step4-export-btn-swap"
+            + (swapMode ? " step4-export-btn-swap-on" : "")
+          }
+          onClick={onToggleSwapMode}
+          aria-pressed={swapMode}
+          title={
+            swapMode
+              ? "Stop swapping — return to normal selection"
+              : "Manually swap slabs between pieces by dragging one piece onto another"
+          }
+        >
+          {swapMode ? "Swap slabs: ON" : "Swap slabs"}
+        </button>
+        <button
+          type="button"
           className="step4-export-btn"
           onClick={onClearAssignments}
           disabled={assigned === 0 && duplicate === 0}
@@ -205,11 +247,15 @@ function Step4ExportBarImpl({
           onClick={handleExportPng}
           disabled={!pngExportReady || pngBusy || dxfBusy}
           title={
-            !allAssigned
-              ? "Assign every piece first"
-              : !imageReadiness.isReady
-                ? "Waiting for slab images to load"
-                : "Download a PNG of the current layout"
+            tooSmall > 0
+              ? "Resolve the too-small slab conflicts first"
+              : duplicate > 0
+                ? "Resolve the duplicate-slab conflicts first"
+                : !allAssigned
+                  ? "Assign every piece first"
+                  : !imageReadiness.isReady
+                    ? "Waiting for slab images to load"
+                    : "Download a PNG of the current layout"
           }
         >
           {pngBusy ? "Exporting…" : "Export client PNG"}
@@ -220,9 +266,13 @@ function Step4ExportBarImpl({
           onClick={handleExportDxf}
           disabled={!dxfExportReady || pngBusy || dxfBusy}
           title={
-            dxfExportReady
-              ? "Download a DXF cut plan for the factory"
-              : "Assign every piece first"
+            tooSmall > 0
+              ? "Resolve the too-small slab conflicts first"
+              : duplicate > 0
+                ? "Resolve the duplicate-slab conflicts first"
+                : dxfExportReady
+                  ? "Download a DXF cut plan for the factory"
+                  : "Assign every piece first"
           }
         >
           {dxfBusy ? "Exporting…" : "Export factory DXF"}

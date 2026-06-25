@@ -48,7 +48,8 @@ import {
   updateColumn, updateDoorway, updateGuideLine,
 } from "./lib/planEdits";
 import {
-  autoAssignBestSlabs, pruneAssignments, setAssignment, summarizeAssignments,
+  autoAssignBestSlabs, pruneAssignments, setAssignment,
+  summarizeAssignments, swapAssignments,
 } from "./lib/finalAssign";
 import {
   exportClientPng, exportFactoryDxf,
@@ -196,6 +197,17 @@ export default function App() {
   const [finalization, setFinalization] = useState<FinalizationState | null>(null);
   const [assignments, setAssignments] = useState<Assignments>({});
   const [allowDuplicateAssignments, setAllowDuplicateAssignments] = useState(false);
+  // Manual swap mode (Step 4): when ON, clicking a piece on the canvas
+  // starts a swap-drag whose drop target swaps the two pieces'
+  // assignments. Geometry / cuts are NEVER mutated by a swap —
+  // see ``onSwapAssignments`` below.
+  const [swapMode, setSwapMode] = useState(false);
+  // Step-lock message banner. Set when the designer clicks a chip
+  // whose prerequisites aren't met (typically Step 4 before Step 3
+  // is complete); cleared automatically after a few seconds or on
+  // the next successful step change.
+  const [stepBlockedMessage, setStepBlockedMessage] = useState<string | null>(null);
+  const stepBlockedTimerRef = useRef<number | null>(null);
 
   // localStorage save metadata.
   const [lastSavedAt, setLastSavedAt] = useState<string | null>(null);
@@ -735,6 +747,21 @@ export default function App() {
     setAssignments({});
   }, []);
 
+  // 0.1.53 — manual swap: drag the assigned slab of one piece onto
+  // another piece to swap their slab_ids. Piece geometry, nominal
+  // dimensions, absorbed-sliver flags, and the cut plan all live on
+  // ``Piece`` objects (finalization.pieces) which this handler never
+  // touches; only the (piece_id → slab_id) edge moves, so the
+  // downstream DXF + PNG exports already pick up the new state via
+  // the existing assignments reference.
+  const onSwapAssignments = useCallback((a: string, b: string) => {
+    if (!a || !b || a === b) return;
+    setAssignments((current) => swapAssignments(current, a, b));
+  }, []);
+  const onToggleSwapMode = useCallback(() => {
+    setSwapMode((v) => !v);
+  }, []);
+
   // 0.1.50 — export handlers. Both close over the FINALISED
   // pieces (the same array Step 4 renders); the export bar already
   // gates the buttons behind "all assigned + no duplicates" so we
@@ -882,12 +909,65 @@ export default function App() {
   const seams = useMemo(() => deriveSeams(editedPieces), [editedPieces]);
 
   // --- Workflow derived state ---------------------------------------------
+  // Step 3 is "complete" for gating purposes only when the designer
+  // has uploaded inventory that produced at least one valid slab.
+  // The fallback (real-export / demo) inventory does NOT satisfy
+  // this — exporting a factory cut plan from sample data would be a
+  // production footgun. Surfaced via gateForStep so the Step-4 chip
+  // and the in-panel "Continue" button stay consistent.
+  const inventoryReady = useMemo(
+    () => uploadSummary !== null && uploadSummary.valid_slabs > 0,
+    [uploadSummary],
+  );
+  const gateInputs = useMemo(() => ({
+    layout: data?.layout ?? null,
+    finalization,
+    inventoryReady,
+  }), [data, finalization, inventoryReady]);
   const gates = useMemo(() => ({
-    1: gateForStep(1, { layout: data?.layout ?? null, finalization }),
-    2: gateForStep(2, { layout: data?.layout ?? null, finalization }),
-    3: gateForStep(3, { layout: data?.layout ?? null, finalization }),
-    4: gateForStep(4, { layout: data?.layout ?? null, finalization }),
-  } as const), [data, finalization]);
+    1: gateForStep(1, gateInputs),
+    2: gateForStep(2, gateInputs),
+    3: gateForStep(3, gateInputs),
+    4: gateForStep(4, gateInputs),
+  } as const), [gateInputs]);
+
+  // Wrap raw setCurrentStep so callers that try to land on an
+  // unreachable step land on a banner instead. Step 4 is the main
+  // user-facing case (blocked before slab upload).
+  const requestStepChange = useCallback((next: WorkflowStep) => {
+    const g = gates[next];
+    if (g.reached) {
+      setCurrentStep(next);
+      setStepBlockedMessage(null);
+      return;
+    }
+    if (g.blockedReason) setStepBlockedMessage(g.blockedReason);
+  }, [gates]);
+
+  const showStepBlockedMessage = useCallback(
+    (_step: WorkflowStep, reason: string) => {
+      setStepBlockedMessage(reason);
+    }, [],
+  );
+
+  // Auto-dismiss the banner after a few seconds so it doesn't sit
+  // around forever once the designer has read it. Cleared on the
+  // next successful step change too (above).
+  useEffect(() => {
+    if (stepBlockedMessage === null) return;
+    if (stepBlockedTimerRef.current !== null) {
+      window.clearTimeout(stepBlockedTimerRef.current);
+    }
+    stepBlockedTimerRef.current = window.setTimeout(() => {
+      setStepBlockedMessage(null);
+    }, 6000);
+    return () => {
+      if (stepBlockedTimerRef.current !== null) {
+        window.clearTimeout(stepBlockedTimerRef.current);
+        stepBlockedTimerRef.current = null;
+      }
+    };
+  }, [stepBlockedMessage]);
 
   // Pieces shown in Step 4. Always the frozen snapshot — re-finalize
   // to refresh. Step 1 / 2 use ``displayedPieces`` (live edits).
@@ -902,6 +982,26 @@ export default function App() {
     ),
     [piecesForStep4, assignments, inventoryMatch, allowDuplicateAssignments],
   );
+
+  // 0.1.53 — Piece-ids whose currently-assigned slab is too small.
+  // Drives the red ring on the canvas and the per-row warning chip
+  // in PiecesPanel. Cheap derivation: walk the matcher response and
+  // flag any assignment whose slab_id isn't in the piece's full
+  // candidate list (Step-4 matcher returns the whole inventory).
+  const invalidAssignmentPieceIds = useMemo(() => {
+    const out = new Set<string>();
+    if (!inventoryMatch) return out;
+    const byId = new Map<string, typeof inventoryMatch.pieces[number]>();
+    for (const pm of inventoryMatch.pieces) byId.set(pm.piece_id, pm);
+    for (const [pid, slabId] of Object.entries(assignments)) {
+      if (!slabId) continue;
+      const pm = byId.get(pid);
+      if (!pm) continue;
+      const fits = pm.candidates.some((c) => c.slab_id === slabId);
+      if (!fits) out.add(pid);
+    }
+    return out;
+  }, [assignments, inventoryMatch]);
 
   // 0.1.52 — slab-image readiness. Recomputes the URL list every
   // render (cheap, just lookups) and feeds it into the readiness
@@ -990,10 +1090,22 @@ export default function App() {
         current={currentStep}
         gates={gates}
         completed={completedSteps}
-        onChange={setCurrentStep}
+        onChange={requestStepChange}
+        onBlockedStep={showStepBlockedMessage}
         onStartNewProject={onStartNewProject}
         onOpenHelp={() => setHelpOpen(true)}
       />
+      {stepBlockedMessage && (
+        <div
+          className="step-blocked-banner"
+          role="alert"
+          aria-live="polite"
+          onClick={() => setStepBlockedMessage(null)}
+          title="Click to dismiss"
+        >
+          {stepBlockedMessage}
+        </div>
+      )}
       <HelpModal open={helpOpen} onClose={() => setHelpOpen(false)} />
       <ExportingOverlay
         open={pngExporting}
@@ -1017,7 +1129,7 @@ export default function App() {
           selectedDemoId={data?.demo_id ?? null}
           loading={loading}
           onPickSample={onPickSample}
-          onContinue={() => setCurrentStep(2)}
+          onContinue={() => requestStepChange(2)}
           canContinue={gates[2].reached}
         />
       )}
@@ -1144,7 +1256,7 @@ export default function App() {
             setUploadImageCount(count);
           }}
           onRegenerateLayout={onRegenerateLayout}
-          onContinue={() => setCurrentStep(4)}
+          onContinue={() => requestStepChange(4)}
           canContinue={gates[4].reached}
         />
       )}
@@ -1169,6 +1281,9 @@ export default function App() {
             tileChoice={tileChoice}
             assignments={assignments}
             inventoryMatch={inventoryMatch}
+            swapMode={swapMode}
+            onSwapAssignments={onSwapAssignments}
+            invalidPieceIds={invalidAssignmentPieceIds}
           />
           <div className="right-stack">
             <SelectionProperties
@@ -1185,7 +1300,10 @@ export default function App() {
               assigned={assignmentSummary.assigned}
               unassigned={assignmentSummary.unassigned}
               noMatch={assignmentSummary.no_match}
+              tooSmall={assignmentSummary.too_small}
               duplicate={assignmentSummary.duplicate}
+              swapMode={swapMode}
+              onToggleSwapMode={onToggleSwapMode}
               canAutoAssign={
                 inventoryMatch !== null
                 && inventoryMatch.pieces.some((p) => p.candidates.length > 0)
@@ -1227,7 +1345,7 @@ export default function App() {
               <button
                 type="button"
                 className="step-panel-btn"
-                onClick={() => setCurrentStep(2)}
+                onClick={() => requestStepChange(2)}
                 title="Go back to the seam editor"
               >
                 ← Back to editor
