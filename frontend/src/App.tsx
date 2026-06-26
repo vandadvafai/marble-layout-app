@@ -1128,6 +1128,13 @@ export default function App() {
         <Step1PlanPanel
           demos={demos}
           selectedDemoId={data?.demo_id ?? null}
+          selectedLabel={data?.label ?? null}
+          pieceCount={data?.layout.piece_count ?? null}
+          tileChoice={tileChoice}
+          tileWidthMm={data?.layout.grid.tile_width_mm ?? null}
+          tileHeightMm={data?.layout.grid.tile_height_mm ?? null}
+          inventoryStats={inventoryInfo?.stats ?? null}
+          onRegenerateLayout={onRegenerateLayout}
           loading={loading}
           onPickSample={onPickSample}
           onContinue={() => requestStepChange(2)}
@@ -1264,7 +1271,6 @@ export default function App() {
             setUploadExcelName(name);
             setUploadImageCount(count);
           }}
-          onRegenerateLayout={onRegenerateLayout}
           onContinue={() => requestStepChange(4)}
           canContinue={gates[4].reached}
         />

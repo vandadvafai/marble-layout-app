@@ -51,17 +51,27 @@ export default function StepperHeader({
     <header className="stepper-header">
       <div className="stepper-brand">
         <span className="stepper-brand-logo" aria-hidden="true">
-          <svg viewBox="0 0 32 32" width="32" height="32">
-            <polygon
-              points="16,3 30,28 2,28"
-              fill="#0f1d3a"
-              stroke="#0f1d3a"
-              strokeWidth="1.5"
-              strokeLinejoin="round"
+          {/* Avandad brand mark — square frame containing a stylised
+              "A": one thin diagonal on the right and two parallel
+              diagonals on the left, mirroring the supplied photo. */}
+          <svg viewBox="0 0 48 48" width="32" height="32">
+            <rect
+              x="3" y="3" width="42" height="42"
+              fill="none" stroke="#0f1d3a" strokeWidth="1.6"
             />
-            <polygon
-              points="16,11 24,25 8,25"
-              fill="#ffffff"
+            {/* right diagonal of the A */}
+            <line
+              x1="24" y1="11" x2="35.5" y2="38"
+              stroke="#0f1d3a" strokeWidth="1.8" strokeLinecap="round"
+            />
+            {/* left side — two parallel diagonals */}
+            <line
+              x1="22" y1="13" x2="12.5" y2="38"
+              stroke="#0f1d3a" strokeWidth="1.8" strokeLinecap="round"
+            />
+            <line
+              x1="18.5" y1="22.5" x2="16" y2="29"
+              stroke="#0f1d3a" strokeWidth="1.8" strokeLinecap="round"
             />
           </svg>
         </span>
