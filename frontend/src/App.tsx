@@ -202,6 +202,12 @@ export default function App() {
   // export bar. The bar still keeps its own "exporting…" button
   // label via the Promise returned by ``onExportPng``.
   const [pngExporting, setPngExporting] = useState(false);
+  // Current stage message for the PNG export overlay. Updated by
+  // ``exportClientPng`` as it moves through the load / decode /
+  // rasterise stages so the designer can see what's happening.
+  const [pngExportStage, setPngExportStage] = useState(
+    "Preparing client image…",
+  );
   const [finalization, setFinalization] = useState<FinalizationState | null>(null);
   const [assignments, setAssignments] = useState<Assignments>({});
   const [allowDuplicateAssignments, setAllowDuplicateAssignments] = useState(false);
@@ -810,8 +816,12 @@ export default function App() {
       return { ok: false, error: "No layout to export." };
     }
     if (pngExporting) {
+      // Defence-in-depth: the fixed action bar disables the button
+      // while ``pngBusy`` is true; this guard covers races where a
+      // double-click could squeeze a second call through.
       return { ok: false, error: "An export is already running." };
     }
+    setPngExportStage("Preparing client image…");
     setPngExporting(true);
     try {
       return await exportClientPng(
@@ -821,6 +831,9 @@ export default function App() {
         assignments,
         inventoryMatch,
         data.label,
+        {
+          onProgress: (msg) => setPngExportStage(msg),
+        },
       );
     } finally {
       setPngExporting(false);
@@ -1297,7 +1310,7 @@ export default function App() {
       <HelpModal open={helpOpen} onClose={() => setHelpOpen(false)} />
       <ExportingOverlay
         open={pngExporting}
-        message="Generating client image… Please wait."
+        message={pngExportStage}
       />
 
       {error && (
