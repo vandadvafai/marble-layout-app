@@ -813,9 +813,10 @@ function InventoryHeader({
           </>
         )}
       </span>
-      <span className="inventory-header-path" title={info.source_path}>
-        {info.source_path}
-      </span>
+      {/* Raw filesystem path used to live here — moved out of the
+          normal user surface in V1 so designers don't see internal
+          ``outputs/...`` paths. Developer Details on Step 3 still
+          exposes it for QA. */}
     </div>
   );
 }

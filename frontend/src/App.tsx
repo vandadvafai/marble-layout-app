@@ -1585,8 +1585,7 @@ export default function App() {
       )}
 
       <footer className="app-footer">
-        4-step workflow · Step 1: Upload · Step 2: Edit · Step 3:
-        Slabs · Step 4: Assign + Export
+        Avandad — Layout Helper · v1.0.0
       </footer>
 
       {currentStep === 4 && data && finalization && (

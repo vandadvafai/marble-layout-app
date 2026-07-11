@@ -89,7 +89,7 @@ export const HELP_UI: Record<Lang, HelpUiStrings> = {
 
 const EN: HelpContent = {
   rtl: false,
-  title: "Stone Layout Workflow Guide",
+  title: "Avandad — Layout Helper Workflow Guide",
   intro:
     "This application helps designers and factory teams create stone "
     + "layouts, assign slabs, and export production files.",

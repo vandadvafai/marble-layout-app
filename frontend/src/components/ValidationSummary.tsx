@@ -1,8 +1,8 @@
 // Compact validation summary for Step 2's right panel.
 //
-// The full ValidationPanel was overwhelming the right stack while
-// the designer was editing. The summary card surfaces only what
-// matters at a glance:
+// The earlier full ValidationPanel (removed in the V1 cleanup)
+// was overwhelming the right stack while the designer was editing.
+// This summary card surfaces only what matters at a glance:
 //   * pass / warning / error state (single chip),
 //   * total issue count,
 //   * the most important rule violation (one line),
