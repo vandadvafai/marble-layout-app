@@ -1019,8 +1019,11 @@ class ManufacturingPolicyBody(BaseModel):
     blade_kerf_mm: float = Field(default=3.0, ge=0.0)
     edge_trim_mm: float = Field(default=5.0, ge=0.0)
     tolerance_mm: float = Field(default=2.0, ge=0.0)
-    profile: str = Field(default="standard")
-    exact_edge_action: str = Field(default="warn")
+    # V1 defaults treat the imported slab as the usable area (see
+    # ``MarginPolicy`` for the reasoning). A frontend that opts in
+    # to Advanced Factory Settings will override these.
+    profile: str = Field(default="exact")
+    exact_edge_action: str = Field(default="allow")
     exact_edge_epsilon_mm: float = Field(default=0.5, ge=0.0)
 
 

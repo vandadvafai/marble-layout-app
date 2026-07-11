@@ -100,8 +100,15 @@ class MarginPolicy:
     blade_kerf_mm: float = 3.0
     edge_trim_mm: float = 5.0
     tolerance_mm: float = 2.0
-    profile: str = PROFILE_STANDARD
-    exact_edge_action: str = EXACT_EDGE_WARN
+    # V1 default: slab dimensions imported into Layout Helper are
+    # already preprocessed by the factory (safe-crop inside the
+    # green boundary), so the usable cutting area is the slab.
+    # ``exact`` profile skips the kerf / trim / tolerance check;
+    # ``allow`` treats a piece flush with the slab edge as ready.
+    # Operators who need the historical strict/standard behaviour
+    # opt in via the frontend's Advanced Factory Settings.
+    profile: str = PROFILE_EXACT
+    exact_edge_action: str = EXACT_EDGE_ALLOW
     # Two dimensions within this many mm of each other count as
     # "the same" for the exact-edge classifier. Kept small so a
     # measurement rounding to 1610 mm still detects the exact fit

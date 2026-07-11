@@ -46,6 +46,12 @@ interface Props {
    *  round-trip through this component's state. */
   manufacturingPolicy: ManufacturingPolicy;
   onPolicyChange: (next: ManufacturingPolicy) => void;
+  /** V1.2 — Advanced Factory Settings toggle. When off (the
+   *  default) the whole manufacturing card is hidden and App
+   *  swaps in the "exact profile, allow exact-edge" defaults so
+   *  no kerf / trim / tolerance validation runs. */
+  advancedFactoryEnabled: boolean;
+  onToggleAdvancedFactory: () => void;
   fitResponse: FactoryFitResponse | null;
   fitChecking: boolean;
   fitError: string | null;
@@ -58,6 +64,7 @@ function Step4ExportBarImpl({
   inventoryValidCount, inventoryUnusedCount,
   swapMode, onToggleSwapMode,
   manufacturingPolicy, onPolicyChange,
+  advancedFactoryEnabled, onToggleAdvancedFactory,
   fitResponse, fitChecking, fitError, failingFit,
 }: Props) {
   // "Ready to export" requires every piece assigned, with no
@@ -209,10 +216,48 @@ function Step4ExportBarImpl({
             assignment tooling only. */}
       </div>
 
+      {/* Advanced Factory Settings toggle (V1.2). Off by default:
+          the app treats the imported slab dims as usable area
+          (safe-crop is already applied at import time). Toggle on
+          to expose blade kerf / trim / tolerance controls + the
+          Strict/Standard/Exact profile picker. */}
+      <div className="step4-mfg-toggle-row">
+        <button
+          type="button"
+          className={
+            "step4-mfg-toggle"
+            + (advancedFactoryEnabled ? " step4-mfg-toggle-on" : "")
+          }
+          onClick={onToggleAdvancedFactory}
+          aria-pressed={advancedFactoryEnabled}
+          title={
+            advancedFactoryEnabled
+              ? "Hide the manufacturing fit controls"
+              : "Show the blade kerf / edge trim / tolerance controls"
+          }
+        >
+          <span className="step4-mfg-toggle-icon" aria-hidden="true">
+            {advancedFactoryEnabled ? "✕" : "⚙"}
+          </span>
+          <span>
+            {advancedFactoryEnabled
+              ? "Hide advanced factory settings"
+              : "Advanced factory settings"}
+          </span>
+        </button>
+        <span className="step4-mfg-toggle-hint">
+          {advancedFactoryEnabled
+            ? "Custom kerf / trim / tolerance active"
+            : "Using imported slab dimensions as usable area"}
+        </span>
+      </div>
+
       {/* Manufacturing tolerances — controls the blade kerf, edge
           trim, dimensional tolerance, profile and exact-edge policy
           the factory-fit check + DXF writer honour. Editing any
-          value re-runs the preflight check on the next App tick. */}
+          value re-runs the preflight check on the next App tick.
+          Hidden by default — see the toggle above. */}
+      {advancedFactoryEnabled && (
       <div className="step4-mfg">
         <div className="step4-mfg-head">
           <span className="step4-mfg-title">Manufacturing fit</span>
@@ -394,6 +439,7 @@ function Step4ExportBarImpl({
           </p>
         )}
       </div>
+      )}
     </div>
   );
 }

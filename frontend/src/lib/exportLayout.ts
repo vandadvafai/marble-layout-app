@@ -393,7 +393,32 @@ export interface ManufacturingPolicy {
   exact_edge_epsilon_mm: number;
 }
 
+/** V1 default policy. Slab dimensions imported into Layout Helper
+ *  are already preprocessed by the factory (safe-crop inside the
+ *  green boundary), so the usable cutting area IS the slab. The
+ *  ``exact`` profile skips the kerf / trim / tolerance checks and
+ *  ``allow`` treats a flush fit as ``ready`` — the effect is that
+ *  the only fit failure the default emits is "piece bigger than
+ *  the slab" (``does_not_fit``), which is a real geometric
+ *  problem the designer must resolve.
+ *
+ *  When the designer opens Advanced Factory Settings, ``App.tsx``
+ *  swaps this out for the user-edited policy. */
 export const DEFAULT_MANUFACTURING_POLICY: ManufacturingPolicy = {
+  blade_kerf_mm: 3.0,
+  edge_trim_mm: 5.0,
+  tolerance_mm: 2.0,
+  profile: "exact",
+  exact_edge_action: "allow",
+  exact_edge_epsilon_mm: 0.5,
+};
+
+/** Starting values the Advanced Factory Settings card ships with
+ *  when the designer first opens it — a conservative kerf +
+ *  tolerance check with no auto-trim. Keeps the default V1 flow
+ *  quiet while giving operators a sensible baseline the moment
+ *  they opt in. */
+export const ADVANCED_DEFAULT_MANUFACTURING_POLICY: ManufacturingPolicy = {
   blade_kerf_mm: 3.0,
   edge_trim_mm: 5.0,
   tolerance_mm: 2.0,

@@ -1110,9 +1110,9 @@ def _exact_edge_piece_body(slab_a: str, slab_w: float, slab_h: float,
 
 def test_exact_edge_default_profile_allows_export():
     """REGRESSION for the "1610 × 1610 slab, 1610 × 1610 piece"
-    report — an exact-edge fit MUST NOT be blocked under the default
-    profile. The verdict reads ``exact_edge`` so the UI can surface
-    a warning; ``factory_ready`` stays True."""
+    report — an exact-edge fit MUST NOT be blocked under the V1
+    default policy (``profile=exact``, ``exact_edge_action=allow``).
+    The verdict reads ``ready`` and ``factory_ready`` stays True."""
     slab_a, _ = _two_slab_ids_for_assignment()
     slab_w, slab_h = _slab_dims_for(slab_a)
     r = client.post(
@@ -1123,7 +1123,10 @@ def test_exact_edge_default_profile_allows_export():
     body = r.json()
     assert body["factory_ready"] is True
     row = body["results"][0]
-    assert row["verdict"] == "exact_edge"
+    # V1 default treats a flush fit as ``ready`` (no user-visible
+    # warning). The advanced-settings "warn" mode still fires the
+    # ``exact_edge`` verdict — see the block/allow tests below.
+    assert row["verdict"] == "ready"
     assert row["factory_ready"] is True
     # Both raw geometric margins are ~0 (the point of "exact edge").
     assert abs(row["geometric_margin_width_mm"]) < 1
@@ -1247,7 +1250,9 @@ def test_fit_response_carries_both_margins():
     assert r.status_code == 200
     body = r.json()
     assert body["policy"]["profile"] == "standard"
-    assert body["policy"]["exact_edge_action"] == "warn"
+    # ``exact_edge_action`` retains its V1 default ("allow") when
+    # the request only overrides ``profile``.
+    assert body["policy"]["exact_edge_action"] == "allow"
     for row in body["results"]:
         for k in (
             "geometric_margin_width_mm",
@@ -1257,6 +1262,57 @@ def test_fit_response_carries_both_margins():
             "profile",
         ):
             assert k in row, row
+
+
+def test_v1_default_policy_is_exact_allow():
+    """V1 disables the manufacturing tolerance system by default.
+    The preflight response's ``policy`` block must reflect the
+    ``exact`` profile with ``exact_edge_action = "allow"`` when the
+    request omits ``manufacturing_policy``."""
+    slab_a, slab_b = _two_slab_ids_for_assignment()
+    r = client.post(
+        "/api/demo-layouts/l_shape/validate-factory-fit",
+        json={
+            "pieces": _two_piece_layout_pieces(),
+            "assignments": {"p1": slab_a, "p2": slab_b},
+        },
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["policy"]["profile"] == "exact"
+    assert body["policy"]["exact_edge_action"] == "allow"
+    # Every result is either ``ready`` (positive margin) or, in the
+    # 1610×1610 flush case, still ``ready`` because ``allow`` upgrades
+    # the exact-edge branch. Nothing under the V1 default should
+    # report ``tight`` / ``insufficient_margin`` / ``exact_edge``.
+    for row in body["results"]:
+        assert row["verdict"] == "ready", row
+        assert row["factory_ready"] is True
+
+
+def test_v1_default_still_blocks_pieces_bigger_than_slab():
+    """The V1 default keeps the raw geometry check — a piece larger
+    than the assigned slab is still ``does_not_fit`` regardless of
+    the profile. Otherwise the operator could ship a plan the
+    factory can't physically cut."""
+    slab_a, _ = _two_slab_ids_for_assignment()
+    r = client.post(
+        "/api/demo-layouts/l_shape/validate-factory-fit",
+        json={
+            "pieces": [{
+                "piece_id": "huge",
+                "polygon": [[0, 0], [5000, 0], [5000, 5000],
+                            [0, 5000], [0, 0]],
+                "nominal_width_mm": 5000.0,
+                "nominal_height_mm": 5000.0,
+            }],
+            "assignments": {"huge": slab_a},
+        },
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["factory_ready"] is False
+    assert body["results"][0]["verdict"] == "does_not_fit"
 
 
 def test_validate_factory_fit_reports_ready_and_tight():

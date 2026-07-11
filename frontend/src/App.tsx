@@ -54,6 +54,7 @@ import {
   summarizeAssignments, swapAssignments,
 } from "./lib/finalAssign";
 import {
+  ADVANCED_DEFAULT_MANUFACTURING_POLICY,
   DEFAULT_MANUFACTURING_POLICY,
   exportClientPng, exportFactoryDxf, exportFactoryPackage,
   validateFactoryFit,
@@ -213,9 +214,17 @@ export default function App() {
   // the Step-4 export bar; ``fitResponse`` is the last preflight
   // result the frontend fetched. Export stays disabled until every
   // piece reports ``factory_ready: true``.
-  const [manufacturingPolicy, setManufacturingPolicy] = useState<ManufacturingPolicy>(
-    DEFAULT_MANUFACTURING_POLICY,
+  // V1 — Advanced Factory Settings default OFF. When OFF the app
+  // uses ``DEFAULT_MANUFACTURING_POLICY`` (profile=exact, action=allow)
+  // regardless of what ``advancedPolicy`` holds; when ON the fit
+  // check + exports run with the designer's edited policy.
+  const [advancedFactoryEnabled, setAdvancedFactoryEnabled] = useState(false);
+  const [advancedPolicy, setAdvancedPolicy] = useState<ManufacturingPolicy>(
+    ADVANCED_DEFAULT_MANUFACTURING_POLICY,
   );
+  const manufacturingPolicy: ManufacturingPolicy = advancedFactoryEnabled
+    ? advancedPolicy
+    : DEFAULT_MANUFACTURING_POLICY;
   const [fitResponse, setFitResponse] = useState<FactoryFitResponse | null>(null);
   const [fitChecking, setFitChecking] = useState(false);
   const [fitError, setFitError] = useState<string | null>(null);
@@ -293,6 +302,8 @@ export default function App() {
     setFinalization(null);
     setAssignments({});
     setAllowDuplicateAssignments(false);
+    setAdvancedFactoryEnabled(false);
+    setAdvancedPolicy(ADVANCED_DEFAULT_MANUFACTURING_POLICY);
     setTileChoice(null);
     fetchDemoLayout(demoId)
       .then((res) => {
@@ -311,6 +322,12 @@ export default function App() {
           if (saved.assignments) setAssignments(saved.assignments);
           if (saved.allowDuplicateAssignments) {
             setAllowDuplicateAssignments(true);
+          }
+          if (saved.advancedFactoryEnabled) {
+            setAdvancedFactoryEnabled(true);
+          }
+          if (saved.advancedManufacturingPolicy) {
+            setAdvancedPolicy(saved.advancedManufacturingPolicy);
           }
           // Resume on whatever step was last active — but only when
           // it's still reachable given the current state. If the
@@ -449,6 +466,8 @@ export default function App() {
         finalization,
         assignments,
         allowDuplicateAssignments,
+        advancedFactoryEnabled,
+        advancedManufacturingPolicy: advancedPolicy,
       });
       setLastSavedAt(savedAt);
     }, SAVE_DEBOUNCE_MS);
@@ -461,6 +480,7 @@ export default function App() {
   }, [
     data, isEdited, editedPieces, editedPlan,
     currentStep, finalization, assignments, allowDuplicateAssignments,
+    advancedFactoryEnabled, advancedPolicy,
   ]);
 
   // --- keyboard shortcuts: Cmd/Ctrl+Z, Cmd/Ctrl+Shift+Z --------------------
@@ -666,6 +686,8 @@ export default function App() {
     setFinalization(null);
     setAssignments({});
     setAllowDuplicateAssignments(false);
+    setAdvancedFactoryEnabled(false);
+    setAdvancedPolicy(ADVANCED_DEFAULT_MANUFACTURING_POLICY);
     setTileChoice(null);
     setUploadSummary(null);
     setUploadExcelName(null);
@@ -1507,7 +1529,11 @@ export default function App() {
                 return Math.max(0, valid - used.size);
               })()}
               manufacturingPolicy={manufacturingPolicy}
-              onPolicyChange={setManufacturingPolicy}
+              onPolicyChange={setAdvancedPolicy}
+              advancedFactoryEnabled={advancedFactoryEnabled}
+              onToggleAdvancedFactory={
+                () => setAdvancedFactoryEnabled((v) => !v)
+              }
               fitResponse={fitResponse}
               fitChecking={fitChecking}
               fitError={fitError}

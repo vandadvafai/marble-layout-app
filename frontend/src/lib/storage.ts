@@ -43,6 +43,19 @@ export interface SavedState {
   /** Designer override that lets a slab be assigned to multiple
    *  pieces simultaneously (Step 4). */
   allowDuplicateAssignments?: boolean;
+  /** V1.2 — Advanced Factory Settings visibility. When true the
+   *  manufacturing card is expanded and ``advancedManufacturingPolicy``
+   *  drives the fit check + exports. When false the app uses the
+   *  V1 exact/allow defaults regardless of what policy sits here. */
+  advancedFactoryEnabled?: boolean;
+  advancedManufacturingPolicy?: {
+    blade_kerf_mm: number;
+    edge_trim_mm: number;
+    tolerance_mm: number;
+    profile: "strict" | "standard" | "exact";
+    exact_edge_action: "allow" | "warn" | "block";
+    exact_edge_epsilon_mm: number;
+  };
 }
 
 export function storageKey(demo_id: string): string {

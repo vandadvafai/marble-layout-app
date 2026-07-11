@@ -4708,6 +4708,61 @@ html, body, #root {
   color: #991b1b;
 }
 
+/* V1.2 — Advanced Factory Settings toggle row (sits above the
+ * manufacturing card when it's expanded, or on its own when the
+ * card is hidden). */
+.step4-mfg-toggle-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: var(--space-3);
+  padding: 8px 10px;
+  background: var(--color-surface-2);
+  border: 1px dashed var(--color-border);
+  border-radius: var(--radius-control);
+}
+.step4-mfg-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-control);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.step4-mfg-toggle:hover {
+  background: var(--color-blue-soft);
+  border-color: rgba(37, 99, 235, 0.4);
+  color: var(--color-blue-ink);
+}
+.step4-mfg-toggle-on {
+  background: var(--color-blue);
+  border-color: var(--color-blue);
+  color: white;
+}
+.step4-mfg-toggle-on:hover {
+  background: var(--color-blue-ink);
+  color: white;
+}
+.step4-mfg-toggle-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  font-size: 11px;
+}
+.step4-mfg-toggle-hint {
+  flex: 1 1 auto;
+  font-size: 11px;
+  color: var(--color-muted);
+  line-height: 1.4;
+}
+
 /* =========================================================================
  * Fixed bottom-right export action bar (V1.1)
  * ========================================================================= */
