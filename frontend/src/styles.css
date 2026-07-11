@@ -4587,6 +4587,126 @@ html, body, #root {
   color: var(--color-muted);
   padding-left: 4px;
 }
+.step4-mfg-issue-margins {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-variant-numeric: tabular-nums;
+  font-size: 10px;
+  text-align: right;
+}
+
+/* Profile selector (V1.2 fit-model split) */
+.step4-mfg-profile {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-control);
+  padding: 4px;
+}
+.step4-mfg-profile-btn {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 8px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  cursor: pointer;
+  font: inherit;
+  text-align: center;
+  color: var(--color-text);
+}
+.step4-mfg-profile-btn:hover {
+  background: var(--color-grey-soft);
+}
+.step4-mfg-profile-btn-active {
+  background: var(--color-blue);
+  border-color: var(--color-blue);
+  color: white;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.12);
+}
+.step4-mfg-profile-btn-active:hover {
+  background: var(--color-blue-ink);
+}
+.step4-mfg-profile-name {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+.step4-mfg-profile-hint {
+  font-size: 10px;
+  opacity: 0.8;
+}
+.step4-mfg-explain {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--color-muted);
+  padding: 8px 10px;
+  background: var(--color-blue-soft);
+  border-radius: var(--radius-control);
+}
+.step4-mfg-explain strong {
+  color: var(--color-blue-ink);
+  font-weight: 700;
+}
+
+/* Exact-edge action segmented control */
+.step4-mfg-exact-edge {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.step4-mfg-exact-edge-buttons {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 4px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-control);
+  padding: 3px;
+}
+.step4-mfg-exact-edge-btn {
+  padding: 5px 8px;
+  border: 1px solid transparent;
+  background: transparent;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  color: var(--color-text);
+}
+.step4-mfg-exact-edge-btn:hover {
+  background: var(--color-grey-soft);
+}
+.step4-mfg-exact-edge-btn-active {
+  background: var(--color-blue);
+  color: white;
+  border-color: var(--color-blue);
+}
+.step4-mfg-input-disabled {
+  opacity: 0.5;
+}
+.step4-mfg-input-disabled input {
+  cursor: not-allowed;
+}
+.step4-mfg-note {
+  margin: 0;
+  font-size: 11px;
+  color: var(--color-muted);
+  line-height: 1.5;
+}
+.step4-mfg-issue-exact_edge {
+  background: var(--color-amber-soft);
+  color: #92400e;
+}
+.step4-mfg-issue-does_not_fit {
+  background: var(--color-red-soft);
+  color: #991b1b;
+}
 
 /* =========================================================================
  * Fixed bottom-right export action bar (V1.1)

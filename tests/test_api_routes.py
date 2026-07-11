@@ -1073,47 +1073,190 @@ def test_export_dxf_rejects_insufficient_margin():
     assert detail["failing"][0]["piece_id"] == "huge"
 
 
-def test_export_dxf_rejects_zero_margin_fit():
-    """Zero-margin fits must NOT be marked factory-ready. The fit
-    check reports ``tight`` and the export is blocked. This test
-    forces the condition by cranking the kerf so a normal 500 × 500
-    cut lands exactly on the usable-area edge."""
-    slab_a, _ = _two_slab_ids_for_assignment()
-    # Look up the slab's real dimensions so we can dial the policy
-    # to make ``usable == piece`` (zero margin).
-    match = client.post(
+def _slab_dims_for(slab_id: str) -> tuple[float, float]:
+    """Look up a slab's real (width, height) from the matcher."""
+    r = client.post(
         "/api/demo-layouts/l_shape/match-inventory",
         json={"pieces": [{"piece_id": "p1", "nominal_width_mm": 500,
                           "nominal_height_mm": 500}]},
-    ).json()
-    slab = next(
-        c for c in match["pieces"][0]["candidates"] if c["slab_id"] == slab_a
     )
-    slab_w = slab["width_mm"]
-    slab_h = slab["height_mm"]
-    # Choose (edge_trim, kerf) so usable - required == 0 on each axis.
-    edge_trim = 5.0
-    kerf = (min(slab_w, slab_h) - 2.0 * edge_trim - 500.0) / 2.0
+    slab = next(
+        c for c in r.json()["pieces"][0]["candidates"]
+        if c["slab_id"] == slab_id
+    )
+    return slab["width_mm"], slab["height_mm"]
+
+
+def _exact_edge_piece_body(slab_a: str, slab_w: float, slab_h: float,
+                           policy: dict | None = None) -> dict:
+    """Piece polygon that exactly matches the slab's dimensions —
+    used across the exact-edge profile tests below."""
     body = {
         "pieces": [{
             "piece_id": "p1",
-            "polygon": [[0, 0], [500, 0], [500, 500], [0, 500], [0, 0]],
-            "nominal_width_mm": 500.0,
-            "nominal_height_mm": 500.0,
+            "polygon": [
+                [0, 0], [slab_w, 0], [slab_w, slab_h],
+                [0, slab_h], [0, 0],
+            ],
+            "nominal_width_mm": slab_w,
+            "nominal_height_mm": slab_h,
         }],
         "assignments": {"p1": slab_a},
-        "manufacturing_policy": {
-            "blade_kerf_mm": kerf,
-            "edge_trim_mm": edge_trim,
-            "tolerance_mm": 0.0,
-        },
     }
+    if policy is not None:
+        body["manufacturing_policy"] = policy
+    return body
+
+
+def test_exact_edge_default_profile_allows_export():
+    """REGRESSION for the "1610 × 1610 slab, 1610 × 1610 piece"
+    report — an exact-edge fit MUST NOT be blocked under the default
+    profile. The verdict reads ``exact_edge`` so the UI can surface
+    a warning; ``factory_ready`` stays True."""
+    slab_a, _ = _two_slab_ids_for_assignment()
+    slab_w, slab_h = _slab_dims_for(slab_a)
+    r = client.post(
+        "/api/demo-layouts/l_shape/validate-factory-fit",
+        json=_exact_edge_piece_body(slab_a, slab_w, slab_h),
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["factory_ready"] is True
+    row = body["results"][0]
+    assert row["verdict"] == "exact_edge"
+    assert row["factory_ready"] is True
+    # Both raw geometric margins are ~0 (the point of "exact edge").
+    assert abs(row["geometric_margin_width_mm"]) < 1
+    assert abs(row["geometric_margin_height_mm"]) < 1
+    # And the actual export endpoint agrees — no HTTP 400.
+    export = client.post(
+        "/api/demo-layouts/l_shape/export-dxf",
+        json=_exact_edge_piece_body(slab_a, slab_w, slab_h),
+    )
+    assert export.status_code == 200
+
+
+def test_exact_edge_action_block_refuses_export():
+    """When the designer opts into ``exact_edge_action = "block"``
+    the same exact-edge fit is refused. The export endpoint returns
+    400 with the ``exact_edge`` verdict — same code path the old
+    zero-margin gate used, just now under an explicit setting."""
+    slab_a, _ = _two_slab_ids_for_assignment()
+    slab_w, slab_h = _slab_dims_for(slab_a)
+    body = _exact_edge_piece_body(slab_a, slab_w, slab_h, policy={
+        "blade_kerf_mm": 3.0,
+        "edge_trim_mm": 5.0,
+        "tolerance_mm": 2.0,
+        "profile": "standard",
+        "exact_edge_action": "block",
+    })
     r = client.post("/api/demo-layouts/l_shape/export-dxf", json=body)
     assert r.status_code == 400
     detail = r.json()["detail"]
-    assert detail["error"] == "manufacturing_fit_failed"
     verdicts = {f["verdict"] for f in detail["failing"]}
-    assert "tight" in verdicts, detail
+    assert "exact_edge" in verdicts, detail
+
+
+def test_exact_profile_ignores_kerf_and_trim():
+    """The ``exact`` profile evaluates raw geometry only — a piece
+    that fits (even with a small positive margin) reports ``ready``
+    regardless of the kerf / trim values the designer left over."""
+    slab_a, _ = _two_slab_ids_for_assignment()
+    slab_w, slab_h = _slab_dims_for(slab_a)
+    r = client.post(
+        "/api/demo-layouts/l_shape/validate-factory-fit",
+        json={
+            "pieces": [{
+                "piece_id": "p1",
+                "polygon": [[0, 0], [slab_w - 1, 0],
+                            [slab_w - 1, slab_h - 1],
+                            [0, slab_h - 1], [0, 0]],
+                "nominal_width_mm": slab_w - 1,
+                "nominal_height_mm": slab_h - 1,
+            }],
+            "assignments": {"p1": slab_a},
+            "manufacturing_policy": {
+                "blade_kerf_mm": 999.0,  # would fail under standard
+                "edge_trim_mm": 999.0,   # would fail under strict
+                "tolerance_mm": 999.0,
+                "profile": "exact",
+            },
+        },
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["factory_ready"] is True
+    row = body["results"][0]
+    assert row["verdict"] == "ready"
+    # The exposed manufacturing_margin equals the geometric margin
+    # under the exact profile (no allowances subtracted).
+    assert abs(
+        row["manufacturing_margin_width_mm"]
+        - row["geometric_margin_width_mm"]
+    ) < 0.01
+
+
+def test_strict_profile_still_blocks_thin_clearance():
+    """The strict profile keeps the old behaviour — kerf + trim +
+    tolerance all apply. A piece that fits raw but only barely
+    clears the strict allowances is refused, so operators who want
+    the conservative check can still opt in."""
+    slab_a, _ = _two_slab_ids_for_assignment()
+    slab_w, slab_h = _slab_dims_for(slab_a)
+    r = client.post(
+        "/api/demo-layouts/l_shape/export-dxf",
+        json={
+            "pieces": [{
+                "piece_id": "p1",
+                "polygon": [[0, 0], [slab_w - 1, 0],
+                            [slab_w - 1, slab_h - 1],
+                            [0, slab_h - 1], [0, 0]],
+                "nominal_width_mm": slab_w - 1,
+                "nominal_height_mm": slab_h - 1,
+            }],
+            "assignments": {"p1": slab_a},
+            "manufacturing_policy": {
+                "blade_kerf_mm": 3.0,
+                "edge_trim_mm": 5.0,
+                "tolerance_mm": 2.0,
+                "profile": "strict",
+            },
+        },
+    )
+    assert r.status_code == 400, r.text
+    detail = r.json()["detail"]
+    verdicts = {f["verdict"] for f in detail["failing"]}
+    # Insufficient margin (kerf + trim leaves the piece hanging over)
+    # or tight — both are acceptable failure modes here.
+    assert verdicts & {"insufficient_margin", "tight"}
+
+
+def test_fit_response_carries_both_margins():
+    """The preflight response exposes BOTH geometric and manufacturing
+    margins on every row + the profile in use, so the UI can explain
+    why a visually valid fit failed the manufacturing check."""
+    slab_a, _ = _two_slab_ids_for_assignment()
+    r = client.post(
+        "/api/demo-layouts/l_shape/validate-factory-fit",
+        json={
+            "pieces": _two_piece_layout_pieces(),
+            "assignments": {"p1": slab_a, "p2": slab_a},
+            "manufacturing_policy": {"profile": "standard"},
+        },
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["policy"]["profile"] == "standard"
+    assert body["policy"]["exact_edge_action"] == "warn"
+    for row in body["results"]:
+        for k in (
+            "geometric_margin_width_mm",
+            "geometric_margin_height_mm",
+            "manufacturing_margin_width_mm",
+            "manufacturing_margin_height_mm",
+            "profile",
+        ):
+            assert k in row, row
 
 
 def test_validate_factory_fit_reports_ready_and_tight():

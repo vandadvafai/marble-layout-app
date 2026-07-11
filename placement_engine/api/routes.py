@@ -1007,11 +1007,21 @@ class ExportDxfPiece(BaseModel):
 
 class ManufacturingPolicyBody(BaseModel):
     """Configurable manufacturing tolerances the fit check + writer
-    honour. All values are millimetres. Defaults match
-    ``placement_engine.api.factory_layout.MarginPolicy``."""
+    honour. All numeric values are millimetres. Defaults match
+    ``placement_engine.api.factory_layout.MarginPolicy``.
+
+    ``profile`` picks which of the three named checks the fit
+    validator runs (``strict`` — kerf + trim + tolerance,
+    ``standard`` — kerf + tolerance, ``exact`` — geometry only).
+    ``exact_edge_action`` decides how flush-with-slab fits are
+    scored (``allow`` / ``warn`` / ``block``).
+    """
     blade_kerf_mm: float = Field(default=3.0, ge=0.0)
     edge_trim_mm: float = Field(default=5.0, ge=0.0)
     tolerance_mm: float = Field(default=2.0, ge=0.0)
+    profile: str = Field(default="standard")
+    exact_edge_action: str = Field(default="warn")
+    exact_edge_epsilon_mm: float = Field(default=0.5, ge=0.0)
 
 
 class ExportDxfRequest(BaseModel):
@@ -1341,6 +1351,9 @@ def validate_demo_factory_fit(demo_id: str, body: ValidateFactoryFitRequest):
             "blade_kerf_mm": policy.blade_kerf_mm,
             "edge_trim_mm": policy.edge_trim_mm,
             "tolerance_mm": policy.tolerance_mm,
+            "profile": policy.profile,
+            "exact_edge_action": policy.exact_edge_action,
+            "exact_edge_epsilon_mm": policy.exact_edge_epsilon_mm,
         },
         "results": [_fit_result_to_dict(r) for r in fit_results],
         "factory_ready": all_factory_ready(fit_results),
@@ -1351,10 +1364,19 @@ def validate_demo_factory_fit(demo_id: str, body: ValidateFactoryFitRequest):
 
 
 def _policy_from_body(body: ManufacturingPolicyBody) -> MarginPolicy:
+    # Guard against unexpected profile / exact_edge_action values
+    # coming off the wire — silently fall back to the defaults
+    # rather than raising, so a stale frontend never breaks the
+    # export flow.
+    profile = body.profile if body.profile in {"strict", "standard", "exact"} else "standard"
+    edge = body.exact_edge_action if body.exact_edge_action in {"allow", "warn", "block"} else "warn"
     return MarginPolicy(
         blade_kerf_mm=body.blade_kerf_mm,
         edge_trim_mm=body.edge_trim_mm,
         tolerance_mm=body.tolerance_mm,
+        profile=profile,
+        exact_edge_action=edge,
+        exact_edge_epsilon_mm=body.exact_edge_epsilon_mm,
     )
 
 
@@ -1424,4 +1446,9 @@ def _fit_result_to_dict(r) -> dict:
         "usable_height_mm": round(r.usable_height_mm, 2),
         "margin_width_mm": round(r.margin_width_mm, 2),
         "margin_height_mm": round(r.margin_height_mm, 2),
+        "geometric_margin_width_mm": round(r.geometric_margin_width_mm, 2),
+        "geometric_margin_height_mm": round(r.geometric_margin_height_mm, 2),
+        "manufacturing_margin_width_mm": round(r.manufacturing_margin_width_mm, 2),
+        "manufacturing_margin_height_mm": round(r.manufacturing_margin_height_mm, 2),
+        "profile": r.profile,
     }

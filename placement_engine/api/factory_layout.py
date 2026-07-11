@@ -42,56 +42,111 @@ import ezdxf.enums
 # ---------------------------------------------------------------------------
 
 
+# Manufacturing profile keys the frontend + tests reference by name.
+# Kept as module-level constants so a typo becomes a name error
+# instead of a silent fallthrough.
+PROFILE_STRICT = "strict"      # kerf + trim + tolerance required
+PROFILE_STANDARD = "standard"  # kerf + tolerance required (no trim)
+PROFILE_EXACT = "exact"        # raw geometry check only
+_PROFILES = (PROFILE_STRICT, PROFILE_STANDARD, PROFILE_EXACT)
+
+# How the checker handles a fit whose RAW geometric margin is zero on
+# at least one axis (piece flush with the slab edge). This case is
+# always physically possible — the operator just needs to align the
+# piece to the slab edge — but automation tolerates it differently:
+EXACT_EDGE_ALLOW = "allow"  # treat as ready, no warning shown
+EXACT_EDGE_WARN = "warn"    # verdict = exact_edge but factory_ready
+EXACT_EDGE_BLOCK = "block"  # verdict = exact_edge, factory_ready=False
+_EXACT_EDGE_ACTIONS = (
+    EXACT_EDGE_ALLOW, EXACT_EDGE_WARN, EXACT_EDGE_BLOCK,
+)
+
+
 @dataclass(frozen=True)
 class MarginPolicy:
     """Manufacturing tolerances the fit checker + writer honour.
 
-    Defaults come from typical stone-cutting practice:
+    Two knobs pick from three named profiles:
 
-      * ``blade_kerf_mm``   — 3 mm width the saw removes per cut. Doubled
-                              on each axis because the piece needs a full
-                              kerf on each side (unless it's flush with
-                              the slab edge, which we don't detect —
-                              conservative default).
-      * ``edge_trim_mm``    — 5 mm the fabricator trims off each edge of
-                              the slab before cutting to remove chipping.
-      * ``tolerance_mm``    — 2 mm dimensional slop the checker allows
-                              before flagging a piece as ``tight``.
-                              Cuts that fit only within this margin are
-                              produced with a warning; anything below
-                              zero margin is refused.
+      * ``profile = "strict"``   — the historic behaviour: piece must
+                                    clear kerf + trim + tolerance on
+                                    all four sides.
+      * ``profile = "standard"`` (default) — piece must clear kerf +
+                                    tolerance. No edge-trim reduction
+                                    of the slab. This matches typical
+                                    cabinet-shop practice.
+      * ``profile = "exact"``     — raw geometry only. Kerf, trim and
+                                    tolerance are IGNORED for the
+                                    ready/tight/insufficient split;
+                                    the checker only refuses a piece
+                                    that's larger than the slab.
+
+    Independently, ``exact_edge_action`` decides what to do when the
+    RAW geometric margin is zero on at least one axis (the piece
+    lands exactly on the slab edge). ``"allow"`` reports ``ready``;
+    ``"warn"`` reports ``exact_edge`` but keeps ``factory_ready =
+    True`` so the export proceeds; ``"block"`` reports
+    ``exact_edge`` with ``factory_ready = False``.
+
+    Rationale for defaults: with the old model an exact-width slab
+    (piece == slab, e.g. 1610 × 1610) was blocked with a large
+    negative margin (-16 mm under kerf 3 mm + trim 5 mm). The bug
+    report calling that "visually valid" is right — physically the
+    piece IS the slab. The new defaults treat exact-edge as a
+    warning (visible to the operator, not a hard block) and reduce
+    the automatic slab reduction to kerf + tolerance.
     """
 
     blade_kerf_mm: float = 3.0
     edge_trim_mm: float = 5.0
     tolerance_mm: float = 2.0
+    profile: str = PROFILE_STANDARD
+    exact_edge_action: str = EXACT_EDGE_WARN
+    # Two dimensions within this many mm of each other count as
+    # "the same" for the exact-edge classifier. Kept small so a
+    # measurement rounding to 1610 mm still detects the exact fit
+    # against a 1610 mm slab.
+    exact_edge_epsilon_mm: float = 0.5
+
+    @property
+    def uses_trim(self) -> bool:
+        return self.profile == PROFILE_STRICT
+
+    @property
+    def uses_kerf(self) -> bool:
+        return self.profile in (PROFILE_STRICT, PROFILE_STANDARD)
+
+    @property
+    def uses_tolerance(self) -> bool:
+        return self.profile in (PROFILE_STRICT, PROFILE_STANDARD)
+
+    def _effective_kerf(self) -> float:
+        return self.blade_kerf_mm if self.uses_kerf else 0.0
+
+    def _effective_tolerance(self) -> float:
+        return self.tolerance_mm if self.uses_tolerance else 0.0
 
     def usable_slab_size(
         self, slab_width_mm: float, slab_height_mm: float,
     ) -> tuple[float, float]:
         """The rectangle the cut piece may occupy inside the slab.
 
-        Subtracts an edge trim on all four sides. The blade kerf is
-        applied around the piece itself (not the slab) — the fit
-        check adds it to the piece's bbox — so it doesn't come out
-        of the usable slab dims here.
+        Only the strict profile subtracts an edge trim; the other
+        profiles let the piece use the slab's full physical area.
+        The blade kerf is applied around the piece itself, not the
+        slab, so it doesn't come out of these values either.
         """
+        trim = self.edge_trim_mm if self.uses_trim else 0.0
         return (
-            slab_width_mm - 2.0 * self.edge_trim_mm,
-            slab_height_mm - 2.0 * self.edge_trim_mm,
+            slab_width_mm - 2.0 * trim,
+            slab_height_mm - 2.0 * trim,
         )
 
 
-# Verdicts, ordered by severity so ``max(verdict, other)`` picks the
-# worst finding when a piece exposes several. ``ready`` means the cut
-# is factory-ready with margin left over the tolerance; ``tight``
-# means it fits but the margin is smaller than the tolerance and the
-# operator should review; ``insufficient_margin`` means the cut fits
-# only if the blade kerf were smaller; ``does_not_fit`` means the
-# slab is too small even before allowances; ``unknown_slab`` means
-# the assigned slab id wasn't found in the inventory.
+# Verdicts, most severe last so ``max(...)`` picks the worst.
 _VERDICT_ORDER = (
     "ready",
+    "exact_edge",
     "tight",
     "insufficient_margin",
     "does_not_fit",
@@ -103,12 +158,23 @@ _VERDICT_ORDER = (
 class FactoryFitResult:
     """One row from ``validate_factory_fit``.
 
-    ``verdict`` is the coarse status; ``factory_ready`` is a boolean
-    convenience that pinches the verdict to a strict "may we run the
-    export today?" answer. ``margin_*`` values are the leftover mm
-    per axis after subtracting piece + kerf from the usable slab
-    rect — negative when the piece doesn't fit. ``reason`` is a
-    single sentence for the UI to show under the affected piece.
+    Field layout is designed so both the UI and the operator can
+    see both margins side by side:
+
+      * ``geometric_margin_*`` — slab − piece. Positive means the
+        piece physically fits; zero means it lands on the slab
+        edge; negative means it's larger than the slab (hard
+        block).
+      * ``manufacturing_margin_*`` — the same margin AFTER the
+        profile's kerf + trim + tolerance are subtracted. This is
+        the value the ``ready`` / ``tight`` / ``insufficient_margin``
+        verdicts key off. When the profile is ``exact`` the two
+        margins are equal.
+
+    ``margin_width_mm`` / ``margin_height_mm`` are retained as
+    aliases of ``manufacturing_margin_*`` so callers that already
+    read those field names keep working. ``factory_ready`` still
+    controls the download button.
     """
 
     piece_id: str
@@ -123,8 +189,14 @@ class FactoryFitResult:
     rotation_needed: bool
     usable_width_mm: float
     usable_height_mm: float
+    # Legacy field names — kept in sync with ``manufacturing_margin_*``.
     margin_width_mm: float
     margin_height_mm: float
+    geometric_margin_width_mm: float = 0.0
+    geometric_margin_height_mm: float = 0.0
+    manufacturing_margin_width_mm: float = 0.0
+    manufacturing_margin_height_mm: float = 0.0
+    profile: str = PROFILE_STANDARD
 
 
 @dataclass(frozen=True)
@@ -212,78 +284,128 @@ def validate_factory_fit(
                 usable_height_mm=0.0,
                 margin_width_mm=-piece_w,
                 margin_height_mm=-piece_h,
+                geometric_margin_width_mm=-piece_w,
+                geometric_margin_height_mm=-piece_h,
+                manufacturing_margin_width_mm=-piece_w,
+                manufacturing_margin_height_mm=-piece_h,
+                profile=policy.profile,
             ))
             continue
 
+        # --- Stage 1: raw GEOMETRY fit -----------------------------
+        # Does the piece physically fit inside the slab? This is a
+        # hard gate — no policy setting relaxes it.
+        geo_margin_w = a.slab_width_mm - piece_w
+        geo_margin_h = a.slab_height_mm - piece_h
+
+        # Manufacturing allowance figures (needed for the label /
+        # response even when we short-circuit to a hard block).
+        kerf = policy._effective_kerf()
+        tol = policy._effective_tolerance()
         usable_w, usable_h = policy.usable_slab_size(
             a.slab_width_mm, a.slab_height_mm,
         )
-        # Kerf lives on all four sides of the piece (conservative —
-        # the writer doesn't try to figure out which edges are flush
-        # with the slab so we always demand full clearance).
-        required_w = piece_w + 2.0 * policy.blade_kerf_mm
-        required_h = piece_h + 2.0 * policy.blade_kerf_mm
+        required_w = piece_w + 2.0 * kerf
+        required_h = piece_h + 2.0 * kerf
+        mfg_margin_w = usable_w - required_w
+        mfg_margin_h = usable_h - required_h
 
-        margin_w = usable_w - required_w
-        margin_h = usable_h - required_h
+        # Exact-edge classifier — piece lands within ``epsilon`` of
+        # the slab edge on at least one axis, both margins ≥ -epsilon.
+        eps = policy.exact_edge_epsilon_mm
+        is_exact_edge = (
+            geo_margin_w >= -eps and geo_margin_h >= -eps
+            and (abs(geo_margin_w) <= eps or abs(geo_margin_h) <= eps)
+        )
 
-        if usable_w <= 0 or usable_h <= 0:
+        if geo_margin_w < -eps or geo_margin_h < -eps:
+            # Piece is larger than the slab on at least one axis —
+            # no cutting policy can rescue this.
             verdict = "does_not_fit"
+            factory_ready = False
             reason = (
-                f"Slab is smaller than the edge trim ({policy.edge_trim_mm} "
-                f"mm each side)."
+                "Cut piece is larger than the slab itself — a "
+                "different slab is required."
             )
-        elif margin_w < 0 or margin_h < 0:
-            # Doesn't fit AT ALL after allowances. Distinguish
-            # "insufficient margin" (piece would fit without kerf/trim
-            # but not with) from "does not fit" (piece bigger than the
-            # slab even ignoring allowances) so the operator can tell
-            # whether tightening the policy would help.
-            if piece_w > a.slab_width_mm or piece_h > a.slab_height_mm:
-                verdict = "does_not_fit"
+
+        elif is_exact_edge:
+            # Piece flush with the slab edge on at least one axis.
+            # Whether this blocks the export is a policy question,
+            # not a geometry question.
+            verdict = "exact_edge"
+            if policy.exact_edge_action == EXACT_EDGE_ALLOW:
+                verdict = "ready"
+                factory_ready = True
                 reason = (
-                    "Cut piece is larger than the slab itself — a "
-                    "different slab is required."
+                    "Piece matches the slab edge exactly — allowed "
+                    "by the current profile."
+                )
+            elif policy.exact_edge_action == EXACT_EDGE_BLOCK:
+                factory_ready = False
+                reason = (
+                    "Piece lands exactly on the slab edge. The "
+                    "current profile blocks exact-edge fits — "
+                    "switch it to 'warn' or 'allow' if the "
+                    "operator can align the piece by hand."
                 )
             else:
-                verdict = "insufficient_margin"
+                # WARN — export proceeds, UI surfaces the flag.
+                factory_ready = True
                 reason = (
-                    "Blade kerf and edge trim leave "
-                    f"{max(0.0, usable_w) - required_w:+.1f} × "
-                    f"{max(0.0, usable_h) - required_h:+.1f} mm — "
-                    "not enough clearance for a safe cut."
+                    "Piece matches the slab edge exactly. Physically "
+                    "possible; the operator will need to align the "
+                    "cut to the slab edge with no kerf reserve."
                 )
-        elif margin_w < policy.tolerance_mm or margin_h < policy.tolerance_mm:
-            # Fits, but the leftover margin is smaller than the
-            # dimensional tolerance the operator specified. Refuse
-            # the "factory-ready" tag; the export path treats this
-            # the same as a hard rejection.
-            verdict = "tight"
+
+        elif policy.profile == PROFILE_EXACT:
+            # Exact profile: geometry-only check, and the exact-edge
+            # branch above already handled the flush cases. Anything
+            # that gets here has positive raw margin → ready.
+            verdict = "ready"
+            factory_ready = True
             reason = (
-                f"Only {margin_w:.1f} × {margin_h:.1f} mm margin left — "
-                f"below the {policy.tolerance_mm:.1f} mm tolerance. "
-                "Increase slab size or reduce kerf/trim before cutting."
+                f"OK — {geo_margin_w:.1f} × {geo_margin_h:.1f} mm "
+                "geometric margin (exact profile)."
             )
+
+        # --- Stage 2: MANUFACTURING allowance fit -------------------
+        elif mfg_margin_w < 0 or mfg_margin_h < 0:
+            # Fits raw but not after kerf / trim. Not physically
+            # impossible; the operator can loosen the profile to
+            # let it through if they trust the tooling.
+            verdict = "insufficient_margin"
+            factory_ready = False
+            missing_w = -mfg_margin_w if mfg_margin_w < 0 else 0.0
+            missing_h = -mfg_margin_h if mfg_margin_h < 0 else 0.0
+            reason = _describe_insufficient(
+                policy, geo_margin_w, geo_margin_h,
+                mfg_margin_w, mfg_margin_h, missing_w, missing_h,
+            )
+
+        elif mfg_margin_w < tol or mfg_margin_h < tol:
+            verdict = "tight"
+            factory_ready = False
+            reason = (
+                f"Only {mfg_margin_w:.1f} × {mfg_margin_h:.1f} mm "
+                f"manufacturing margin — below the {tol:.1f} mm "
+                "tolerance. Loosen the tolerance or switch to the "
+                "'standard' / 'exact' profile if the tooling can "
+                "cope with less clearance."
+            )
+
         else:
             verdict = "ready"
-            reason = "OK — margin exceeds the manufacturing tolerance."
-
-        # Zero-margin (exact fit) MUST NOT report ready — that's the
-        # explicit spec. The tolerance branch above catches it because
-        # tolerance defaults to > 0, but re-guard here so future default
-        # tweaks don't accidentally allow a 0.0 margin export.
-        if verdict == "ready" and (margin_w <= 0.0 or margin_h <= 0.0):
-            verdict = "tight"
+            factory_ready = True
             reason = (
-                "Cut lands exactly on the slab edge — zero margin. Not "
-                "safe for production without manual adjustment."
+                f"OK — {mfg_margin_w:.1f} × {mfg_margin_h:.1f} mm "
+                "manufacturing margin (above tolerance)."
             )
 
         out.append(FactoryFitResult(
             piece_id=a.piece_id,
             slab_id=a.slab_id,
             verdict=verdict,
-            factory_ready=(verdict == "ready"),
+            factory_ready=factory_ready,
             reason=reason,
             piece_width_mm=piece_w,
             piece_height_mm=piece_h,
@@ -292,10 +414,44 @@ def validate_factory_fit(
             rotation_needed=a.rotation_needed,
             usable_width_mm=max(0.0, usable_w),
             usable_height_mm=max(0.0, usable_h),
-            margin_width_mm=margin_w,
-            margin_height_mm=margin_h,
+            # ``margin_*`` remains the manufacturing figure so the
+            # V1 UI keeps rendering the same value. Callers that want
+            # to see both can now read the geometric_/manufacturing_
+            # fields alongside.
+            margin_width_mm=mfg_margin_w,
+            margin_height_mm=mfg_margin_h,
+            geometric_margin_width_mm=geo_margin_w,
+            geometric_margin_height_mm=geo_margin_h,
+            manufacturing_margin_width_mm=mfg_margin_w,
+            manufacturing_margin_height_mm=mfg_margin_h,
+            profile=policy.profile,
         ))
     return out
+
+
+def _describe_insufficient(
+    policy: MarginPolicy,
+    geo_w: float, geo_h: float,
+    mfg_w: float, mfg_h: float,
+    missing_w: float, missing_h: float,
+) -> str:
+    """One-sentence explanation of a failing manufacturing check
+    that highlights the difference between raw geometry and the
+    allowances the current profile subtracts."""
+    parts: list[str] = []
+    if policy.uses_kerf and policy.blade_kerf_mm > 0:
+        parts.append(f"kerf {policy.blade_kerf_mm:.1f} mm")
+    if policy.uses_trim and policy.edge_trim_mm > 0:
+        parts.append(f"trim {policy.edge_trim_mm:.1f} mm")
+    allowance_desc = " + ".join(parts) if parts else "manufacturing allowance"
+    return (
+        f"Piece fits raw ({geo_w:+.1f} × {geo_h:+.1f} mm geometric "
+        f"margin) but the {allowance_desc} leaves "
+        f"{mfg_w:+.1f} × {mfg_h:+.1f} mm — need "
+        f"{max(missing_w, missing_h):.1f} mm more. Loosen the "
+        f"profile (try 'standard' or 'exact') if the tooling can "
+        "cope."
+    )
 
 
 def all_factory_ready(results: Iterable[FactoryFitResult]) -> bool:

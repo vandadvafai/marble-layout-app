@@ -373,16 +373,33 @@ export async function exportClientPng(
  *  Defaults mirror ``placement_engine.api.factory_layout.MarginPolicy``
  *  so a caller that doesn't override anything gets the same numbers
  *  the backend would have used. All values are in millimetres. */
+export type ManufacturingProfile = "strict" | "standard" | "exact";
+export type ExactEdgeAction = "allow" | "warn" | "block";
+
 export interface ManufacturingPolicy {
   blade_kerf_mm: number;
   edge_trim_mm: number;
   tolerance_mm: number;
+  /** Which fit gate to run — see the backend ``MarginPolicy`` for
+   *  the semantics. Defaults to ``"standard"``. */
+  profile: ManufacturingProfile;
+  /** How to score an exact-edge fit (piece flush with the slab
+   *  boundary). ``"warn"`` (the default) still lets the export
+   *  proceed with a ``verdict = "exact_edge"`` flag. */
+  exact_edge_action: ExactEdgeAction;
+  /** Millimetre band the checker treats as "exact" — 0.5 mm keeps
+   *  a 1610 mm slab / 1610 mm cut on the exact-edge branch even
+   *  after rounding. */
+  exact_edge_epsilon_mm: number;
 }
 
 export const DEFAULT_MANUFACTURING_POLICY: ManufacturingPolicy = {
   blade_kerf_mm: 3.0,
   edge_trim_mm: 5.0,
   tolerance_mm: 2.0,
+  profile: "standard",
+  exact_edge_action: "warn",
+  exact_edge_epsilon_mm: 0.5,
 };
 
 /** Per-piece verdict from the preflight fit endpoint. Mirrors the
@@ -392,7 +409,7 @@ export interface FactoryFitResult {
   piece_id: string;
   slab_id: string;
   verdict: "ready" | "tight" | "insufficient_margin"
-    | "does_not_fit" | "unknown_slab";
+    | "does_not_fit" | "unknown_slab" | "exact_edge";
   factory_ready: boolean;
   reason: string;
   piece_width_mm: number;
@@ -404,6 +421,11 @@ export interface FactoryFitResult {
   usable_height_mm: number;
   margin_width_mm: number;
   margin_height_mm: number;
+  geometric_margin_width_mm: number;
+  geometric_margin_height_mm: number;
+  manufacturing_margin_width_mm: number;
+  manufacturing_margin_height_mm: number;
+  profile: ManufacturingProfile;
 }
 
 export interface FactoryFitResponse {
