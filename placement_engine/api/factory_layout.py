@@ -308,11 +308,14 @@ def all_factory_ready(results: Iterable[FactoryFitResult]) -> bool:
 
 
 _LAYER_DEFS: dict[str, dict] = {
-    "SLAB_BOUNDARIES": {"color": 7},   # slab outline (black/white)
-    "SLAB_USABLE_AREA": {"color": 8},  # dashed rect after edge trim + kerf
-    "CUT_PIECES":      {"color": 5},   # blue closed cut contour
-    "PIECE_LABELS":    {"color": 2},   # yellow — piece id
-    "SLAB_INFO":       {"color": 4},   # cyan — slab id + cut + rotation
+    # Layer names spec'd by the V1.1 milestone brief. Rename from
+    # the earlier ``SLAB_BOUNDARIES`` / ``SLAB_INFO`` scheme so
+    # AutoCAD operators see the standard convention.
+    "SLAB_BOUNDARY":    {"color": 7},   # slab outline (black/white)
+    "SLAB_USABLE_AREA": {"color": 8},   # dashed rect after edge trim + kerf
+    "CUT_PIECES":       {"color": 5},   # blue closed cut contour
+    "DIMENSIONS":       {"color": 4},   # cyan — dimension lines / text
+    "LABELS":           {"color": 2},   # yellow — piece + slab ids
 }
 
 # Slab-tile layout in the DXF file. Slabs are arranged in a grid so
@@ -438,7 +441,7 @@ def build_factory_dxf_bytes(
         msp.add_text(
             "No assigned pieces — nothing to cut.",
             height=100.0,
-            dxfattribs={"layer": "SLAB_INFO"},
+            dxfattribs={"layer": "LABELS"},
         ).set_placement((0, 0), align=ezdxf.enums.TextEntityAlignment.LEFT)
         sink = io.StringIO()
         doc.write(sink)
@@ -470,7 +473,7 @@ def build_factory_dxf_bytes(
             [(sx, sy), (sx + sw, sy),
              (sx + sw, sy + sh), (sx, sy + sh)],
             close=True,
-            dxfattribs={"layer": "SLAB_BOUNDARIES"},
+            dxfattribs={"layer": "SLAB_BOUNDARY"},
         )
 
         # Usable-area rectangle (dashed) inside the boundary.
@@ -507,7 +510,7 @@ def build_factory_dxf_bytes(
             piece_label = msp.add_text(
                 a.piece_id,
                 height=text_h,
-                dxfattribs={"layer": "PIECE_LABELS"},
+                dxfattribs={"layer": "LABELS"},
             )
             piece_label.set_placement(
                 (pcx, pcy),
@@ -521,20 +524,21 @@ def build_factory_dxf_bytes(
             head += f" · S/N {a.slab_serial}"
         head_txt = msp.add_text(
             head, height=text_h * 0.9,
-            dxfattribs={"layer": "SLAB_INFO"},
+            dxfattribs={"layer": "LABELS"},
         )
         head_txt.set_placement(
             (sx, sy + sh + text_h * 0.4),
             align=ezdxf.enums.TextEntityAlignment.LEFT,
         )
 
-        # Slab dims — under the slab id.
+        # Slab dims — under the slab id. On the DIMENSIONS layer so
+        # dimension-only viewers pick them up.
         dims = (
             f"slab {a.slab_width_mm:.0f} × {a.slab_height_mm:.0f} mm"
         )
         dims_txt = msp.add_text(
             dims, height=text_h * 0.55,
-            dxfattribs={"layer": "SLAB_INFO"},
+            dxfattribs={"layer": "DIMENSIONS"},
         )
         dims_txt.set_placement(
             (sx, sy + sh + text_h * 0.4 + text_h * 1.05),
@@ -554,7 +558,7 @@ def build_factory_dxf_bytes(
         )
         cut_txt = msp.add_text(
             cut_line, height=text_h * 0.55,
-            dxfattribs={"layer": "SLAB_INFO"},
+            dxfattribs={"layer": "DIMENSIONS"},
         )
         cut_txt.set_placement(
             (sx, sy - text_h * 0.8),
@@ -571,7 +575,7 @@ def build_factory_dxf_bytes(
             )
             verdict_txt = msp.add_text(
                 verdict, height=text_h * 0.5,
-                dxfattribs={"layer": "SLAB_INFO"},
+                dxfattribs={"layer": "LABELS"},
             )
             verdict_txt.set_placement(
                 (sx, sy - text_h * 0.8 - text_h * 0.9),
@@ -595,3 +599,237 @@ def build_factory_dxf_bytes(
     sink = io.StringIO()
     doc.write(sink)
     return sink.getvalue().encode("utf-8")
+
+
+def group_by_slab(
+    assignments: Sequence[AssignmentInput],
+) -> dict[str, list[AssignmentInput]]:
+    """Group assignments by ``slab_id`` preserving insertion order.
+
+    Duplicate-slab assignments (allowed by the Step-4 override) end
+    up on a single slab DXF containing every piece that shares the
+    slab, which is what the CNC operator needs — they'll do all cuts
+    on that slab in one pass. Order preservation keeps the DXFs
+    deterministic for a given (input, layout option).
+    """
+    out: dict[str, list[AssignmentInput]] = {}
+    for a in assignments:
+        out.setdefault(a.slab_id, []).append(a)
+    return out
+
+
+def build_single_slab_dxf_bytes(
+    slab_assignments: Sequence[AssignmentInput],
+    policy: MarginPolicy,
+    fit_results: Sequence[FactoryFitResult] | None = None,
+) -> bytes:
+    """Emit a single-slab factory DXF.
+
+    Contract:
+      * One rectangle on ``SLAB_BOUNDARY`` with the slab's real
+        width × height.
+      * Dashed usable area on ``SLAB_USABLE_AREA`` inside the
+        boundary.
+      * Every piece assigned to this slab rendered on
+        ``CUT_PIECES`` at the ``edge_trim + kerf`` offset. When
+        multiple pieces share a slab they are stacked vertically
+        inside the usable area (a simple "shelf" packer — one
+        piece per row) so cuts don't overlap.
+      * ``LABELS`` — slab id header + per-piece labels centred
+        inside each piece.
+      * ``DIMENSIONS`` — slab and per-piece dimension text.
+
+    Callers must pass at least one assignment; every assignment
+    must share the same ``slab_id``.
+    """
+    if not slab_assignments:
+        raise ValueError("build_single_slab_dxf_bytes: no assignments")
+    slab_id = slab_assignments[0].slab_id
+    if any(a.slab_id != slab_id for a in slab_assignments):
+        raise ValueError(
+            "build_single_slab_dxf_bytes: mixed slab_ids in one call",
+        )
+    sw = slab_assignments[0].slab_width_mm
+    sh = slab_assignments[0].slab_height_mm
+    slab_serial = slab_assignments[0].slab_serial
+
+    doc = ezdxf.new(dxfversion="R2013", setup=True)
+    doc.units = ezdxf.units.MM
+    _ensure_layers(doc)
+    msp = doc.modelspace()
+
+    text_h = _label_text_height(max(sw, sh))
+    inset = policy.edge_trim_mm + policy.blade_kerf_mm
+
+    # Slab boundary (closed).
+    msp.add_lwpolyline(
+        [(0.0, 0.0), (sw, 0.0), (sw, sh), (0.0, sh)],
+        close=True,
+        dxfattribs={"layer": "SLAB_BOUNDARY"},
+    )
+
+    # Usable area (dashed).
+    usable_w, usable_h = policy.usable_slab_size(sw, sh)
+    if usable_w > 0 and usable_h > 0:
+        ux0 = policy.edge_trim_mm
+        uy0 = policy.edge_trim_mm
+        usable = msp.add_lwpolyline(
+            [(ux0, uy0), (ux0 + usable_w, uy0),
+             (ux0 + usable_w, uy0 + usable_h), (ux0, uy0 + usable_h)],
+            close=True,
+            dxfattribs={"layer": "SLAB_USABLE_AREA"},
+        )
+        usable.dxf.linetype = "DASHED"
+
+    # Slab id + dims (top-left of the drawing, above the slab).
+    header = f"SLAB {slab_id}"
+    if slab_serial:
+        header += f" · S/N {slab_serial}"
+    msp.add_text(
+        header, height=text_h * 0.9,
+        dxfattribs={"layer": "LABELS"},
+    ).set_placement(
+        (0.0, sh + text_h * 0.4),
+        align=ezdxf.enums.TextEntityAlignment.LEFT,
+    )
+    msp.add_text(
+        f"slab {sw:.0f} × {sh:.0f} mm",
+        height=text_h * 0.55,
+        dxfattribs={"layer": "DIMENSIONS"},
+    ).set_placement(
+        (0.0, sh + text_h * 0.4 + text_h * 1.05),
+        align=ezdxf.enums.TextEntityAlignment.LEFT,
+    )
+
+    fit_by_key: dict[tuple[str, str], FactoryFitResult] = {}
+    if fit_results is not None:
+        for r in fit_results:
+            fit_by_key[(r.piece_id, r.slab_id)] = r
+
+    # Shelf packer: stack pieces vertically inside the usable area.
+    # Every piece gets the LEFT edge of the usable region as its x
+    # origin; y advances by piece_height + kerf per row. This isn't
+    # optimal packing, but it's deterministic, easy for the operator
+    # to read, and the common case is 1 piece / slab anyway.
+    y_cursor = policy.edge_trim_mm + policy.blade_kerf_mm
+    for a in slab_assignments:
+        # Rotate the polygon around its own centroid so the bbox is
+        # tight, then translate into place.
+        xs = [pt[0] for pt in a.polygon]
+        ys = [pt[1] for pt in a.polygon]
+        cx = (min(xs) + max(xs)) / 2.0
+        cy = (min(ys) + max(ys)) / 2.0
+        if a.rotation_needed:
+            rotated = _rotate_polygon(a.polygon, 90.0, (cx, cy))
+        else:
+            rotated = list(a.polygon)
+        rxs = [pt[0] for pt in rotated]
+        rys = [pt[1] for pt in rotated]
+        rw = max(rxs) - min(rxs)
+        rh = max(rys) - min(rys)
+        x_place = policy.edge_trim_mm + policy.blade_kerf_mm
+        placed = _translate_polygon(
+            rotated, x_place - min(rxs), y_cursor - min(rys),
+        )
+        if len(placed) < 3:
+            continue
+
+        msp.add_lwpolyline(
+            placed, close=True,
+            dxfattribs={"layer": "CUT_PIECES"},
+        )
+
+        pcx = x_place + rw / 2.0
+        pcy = y_cursor + rh / 2.0
+        msp.add_text(
+            a.piece_id, height=text_h,
+            dxfattribs={"layer": "LABELS"},
+        ).set_placement(
+            (pcx, pcy),
+            align=ezdxf.enums.TextEntityAlignment.MIDDLE_CENTER,
+        )
+        rot = " · ↻90°" if a.rotation_needed else ""
+        waste = (
+            f" · waste {a.waste_fraction * 100:.0f}%"
+            if a.waste_fraction is not None else ""
+        )
+        msp.add_text(
+            (
+                f"{a.piece_id}: {a.cut_width_mm:.0f} × "
+                f"{a.cut_height_mm:.0f} mm{rot}{waste}"
+            ),
+            height=text_h * 0.5,
+            dxfattribs={"layer": "DIMENSIONS"},
+        ).set_placement(
+            (x_place, y_cursor + rh + text_h * 0.15),
+            align=ezdxf.enums.TextEntityAlignment.LEFT,
+        )
+
+        result = fit_by_key.get((a.piece_id, a.slab_id))
+        if result is not None:
+            msp.add_text(
+                (
+                    f"fit: {result.verdict} · margin "
+                    f"{result.margin_width_mm:+.1f} × "
+                    f"{result.margin_height_mm:+.1f} mm"
+                ),
+                height=text_h * 0.45,
+                dxfattribs={"layer": "LABELS"},
+            ).set_placement(
+                (x_place, y_cursor - text_h * 0.6),
+                align=ezdxf.enums.TextEntityAlignment.LEFT,
+            )
+
+        y_cursor += rh + policy.blade_kerf_mm * 2.0 + policy.edge_trim_mm
+
+    sink = io.StringIO()
+    doc.write(sink)
+    return sink.getvalue().encode("utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Filename helpers — kept here so the same rules apply to overview
+# and per-slab DXFs, and the frontend can request the same pattern.
+# ---------------------------------------------------------------------------
+
+
+_FILENAME_SAFE_CHARS = set(
+    "abcdefghijklmnopqrstuvwxyz"
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    "0123456789-_",
+)
+
+
+def sanitize_filename_component(raw: str, fallback: str = "project") -> str:
+    """Reduce ``raw`` to a filesystem-safe fragment.
+
+    * Whitespace and unsafe punctuation collapse to underscores.
+    * Consecutive underscores collapse to one.
+    * Leading / trailing underscores are trimmed.
+    * If nothing safe survives, returns ``fallback``.
+
+    This is intentionally strict — the resulting fragment must be
+    safe on Windows, macOS and Linux without additional quoting.
+    """
+    if not raw:
+        return fallback
+    out: list[str] = []
+    prev_underscore = False
+    for ch in raw:
+        if ch in _FILENAME_SAFE_CHARS:
+            out.append(ch)
+            prev_underscore = False
+        else:
+            if not prev_underscore:
+                out.append("_")
+                prev_underscore = True
+    cleaned = "".join(out).strip("_")
+    return cleaned or fallback
+
+
+def slab_filename_component(slab_id: str) -> str:
+    """Sanitize a slab id for use inside a filename. Slab ids can
+    include slashes and colons in the real inventory (e.g.
+    ``1781722-4731/AV2040643-04``) which are invalid on most
+    filesystems — collapse them to underscores."""
+    return sanitize_filename_component(slab_id, fallback="slab")

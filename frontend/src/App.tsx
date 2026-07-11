@@ -29,6 +29,7 @@ import SelectionProperties from "./components/SelectionProperties";
 import Step1PlanPanel from "./components/Step1PlanPanel";
 import Step3InventoryPanel from "./components/Step3InventoryPanel";
 import Step4ExportBar from "./components/Step4ExportBar";
+import ExportActionBar from "./components/ExportActionBar";
 import ExportingOverlay from "./components/ExportingOverlay";
 import HelpModal from "./components/HelpModal";
 import StepperHeader from "./components/StepperHeader";
@@ -54,7 +55,8 @@ import {
 } from "./lib/finalAssign";
 import {
   DEFAULT_MANUFACTURING_POLICY,
-  exportClientPng, exportFactoryDxf, validateFactoryFit,
+  exportClientPng, exportFactoryDxf, exportFactoryPackage,
+  validateFactoryFit,
 } from "./lib/exportLayout";
 import type {
   FactoryFitResponse, FactoryFitResult, ManufacturingPolicy,
@@ -782,52 +784,43 @@ export default function App() {
   // gates the buttons behind "all assigned + no duplicates" so we
   // don't need a second check here.
   const onExportPng = useCallback(async () => {
-    if (!data) return { ok: false, error: "No demo loaded." };
+    if (!data || !finalization) {
+      return { ok: false, error: "No layout to export." };
+    }
     if (pngExporting) {
-      // Defensive — the bar already disables the button while
-      // pngBusy, but a stale ref could squeeze a second click
-      // through. Refuse it.
       return { ok: false, error: "An export is already running." };
     }
     setPngExporting(true);
     try {
-      return await exportClientPng(data.demo_id);
+      return await exportClientPng(
+        data.demo_id,
+        data.layout,
+        finalization.pieces,
+        assignments,
+        inventoryMatch,
+        data.label,
+      );
     } finally {
       setPngExporting(false);
     }
-  }, [data, pngExporting]);
+  }, [data, finalization, assignments, inventoryMatch, pngExporting]);
 
-  const onExportDxf = useCallback(async () => {
+  // ``onExportDxf`` (single-file DXF) is no longer wired to a UI
+  // button — the Export Factory Package endpoint bundles both the
+  // overview DXF and the per-slab DXFs. Kept here in case an
+  // external caller wants to trigger the single-file endpoint.
+  void exportFactoryDxf;
+
+  const onExportFactoryPackage = useCallback(async () => {
     if (!data || !finalization) {
       return { ok: false, error: "Layout not finalised." };
     }
-    const doorways = editedPlan
-      ? editedPlan.doorways.map(
-          (d) => [d.segment[0], d.segment[1]] as [
-            [number, number], [number, number],
-          ],
-        )
-      : [];
-    // Re-derive seams from the FINALISED pieces so the DXF lists
-    // the cuts the factory will actually make, not whatever the
-    // live Step-2 editor would show.
-    const finalSeams = deriveSeams(finalization.pieces);
-    const seamSegments = finalSeams.map((s) => {
-      const [a, b] = s.range;
-      return s.orientation === "vertical"
-        ? [[s.position, a], [s.position, b]] as [
-            [number, number], [number, number],
-          ]
-        : [[a, s.position], [b, s.position]] as [
-            [number, number], [number, number],
-          ];
-    });
-    return exportFactoryDxf(
+    return exportFactoryPackage(
       data.demo_id, finalization.pieces, assignments,
-      doorways, seamSegments,
       manufacturingPolicy,
+      data.label,
     );
-  }, [data, finalization, assignments, editedPlan, manufacturingPolicy]);
+  }, [data, finalization, assignments, manufacturingPolicy]);
 
   // 0.1.43 — when the Step-3 upload changes (new upload or clear),
   // refresh the resolved-inventory chip AND invalidate the Step-4
@@ -1148,6 +1141,115 @@ export default function App() {
     [fitResponse],
   );
 
+  // Aggregate every reason the export is currently blocked. The
+  // fixed bottom-right action bar renders these; each item points
+  // the designer at a single actionable fix. Order is by importance
+  // (unassigned → invalid fit → duplicates → images).
+  const exportBlockers = useMemo(() => {
+    const list: {
+      id: string;
+      label: string;
+      detail?: string;
+      severity: "critical" | "warn";
+    }[] = [];
+    if (assignmentSummary.total === 0) {
+      list.push({
+        id: "no-pieces",
+        label: "No pieces to export",
+        detail: "Finalize the Step 2 layout first.",
+        severity: "critical",
+      });
+    }
+    if (assignmentSummary.unassigned > 0) {
+      list.push({
+        id: "unassigned",
+        label: `${assignmentSummary.unassigned} piece${assignmentSummary.unassigned === 1 ? "" : "s"} unassigned`,
+        detail: "Assign a slab to every piece.",
+        severity: "critical",
+      });
+    }
+    if (assignmentSummary.no_match > 0) {
+      list.push({
+        id: "no-match",
+        label: `${assignmentSummary.no_match} piece${assignmentSummary.no_match === 1 ? "" : "s"} have no matching slab`,
+        detail: "Upload more inventory or resize the piece.",
+        severity: "critical",
+      });
+    }
+    if (assignmentSummary.too_small > 0) {
+      list.push({
+        id: "too-small",
+        label: `${assignmentSummary.too_small} assignment${assignmentSummary.too_small === 1 ? "" : "s"} too small`,
+        detail: "Swap the affected pieces to a larger slab.",
+        severity: "critical",
+      });
+    }
+    if (assignmentSummary.duplicate > 0) {
+      list.push({
+        id: "duplicate",
+        label: `${assignmentSummary.duplicate} duplicate slab assignment${assignmentSummary.duplicate === 1 ? "" : "s"}`,
+        detail: "Enable 'allow same slab' or pick different slabs.",
+        severity: "critical",
+      });
+    }
+    if (failingFitResults.length > 0) {
+      list.push({
+        id: "fit",
+        label: `${failingFitResults.length} manufacturing-fit issue${failingFitResults.length === 1 ? "" : "s"}`,
+        detail: "Reduce kerf/trim or move the piece to a larger slab.",
+        severity: "critical",
+      });
+    }
+    if (assignmentSummary.total > 0
+        && assignmentSummary.assigned === assignmentSummary.total
+        && imageReadiness.total > 0 && !imageReadiness.isReady) {
+      list.push({
+        id: "images-loading",
+        label: `Slab images still loading (${imageReadiness.loaded}/${imageReadiness.total})`,
+        detail: "The client image needs every photo to finish loading.",
+        severity: "warn",
+      });
+    }
+    if (assignmentSummary.total > 0
+        && assignmentSummary.assigned === assignmentSummary.total
+        && imageReadiness.failed > 0) {
+      list.push({
+        id: "images-failed",
+        label: `${imageReadiness.failed} slab photo${imageReadiness.failed === 1 ? "" : "s"} failed to load`,
+        detail: "Re-upload the missing photos before exporting the client image.",
+        severity: "warn",
+      });
+    }
+    if (validationError) {
+      list.push({
+        id: "validation",
+        label: "Layout validation error",
+        detail: validationError,
+        severity: "critical",
+      });
+    }
+    return list;
+  }, [
+    assignmentSummary, failingFitResults, imageReadiness, validationError,
+  ]);
+
+  // Critical blockers hard-block export; warnings (photos loading /
+  // failed) block only the client image but not the DXF package.
+  // The action bar reads ``canExport`` for the DXF and combines it
+  // with ``imagesReady`` for the PNG.
+  const canExport = useMemo(() => {
+    return (
+      currentStep === 4
+      && exportBlockers.every((b) => b.severity !== "critical")
+      && assignmentSummary.total > 0
+      && assignmentSummary.assigned === assignmentSummary.total
+      && fitResponse !== null
+      && fitResponse.factory_ready
+    );
+  }, [
+    currentStep, exportBlockers, assignmentSummary, fitResponse,
+  ]);
+
   return (
     <div className="app">
       <StepperHeader
@@ -1361,6 +1463,7 @@ export default function App() {
             inventoryMatch={inventoryMatch}
             swapMode={swapMode}
             onSwapAssignments={onSwapAssignments}
+            onAssignSlabToPiece={onAssignSlab}
             invalidPieceIds={invalidAssignmentPieceIds}
           />
           <div className="right-stack">
@@ -1403,9 +1506,6 @@ export default function App() {
                 );
                 return Math.max(0, valid - used.size);
               })()}
-              onExportPng={onExportPng}
-              onExportDxf={onExportDxf}
-              imageReadiness={imageReadiness}
               manufacturingPolicy={manufacturingPolicy}
               onPolicyChange={setManufacturingPolicy}
               fitResponse={fitResponse}
@@ -1449,6 +1549,16 @@ export default function App() {
         4-step workflow · Step 1: Upload · Step 2: Edit · Step 3:
         Slabs · Step 4: Assign + Export
       </footer>
+
+      {currentStep === 4 && data && finalization && (
+        <ExportActionBar
+          canExport={canExport}
+          blockers={exportBlockers}
+          imagesReady={imageReadiness.isReady}
+          onExportClientImage={onExportPng}
+          onExportFactoryPackage={onExportFactoryPackage}
+        />
+      )}
     </div>
   );
 }

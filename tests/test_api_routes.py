@@ -946,7 +946,9 @@ def test_export_dxf_returns_valid_dxf_when_all_assigned():
     assert r.headers["content-type"].startswith("application/dxf")
     cd = r.headers.get("content-disposition", "")
     assert cd.startswith("attachment")
-    assert "factory_cut_plan_l_shape_" in cd
+    # V1.1 filename format: ``<Project>_FactoryCutPlan_Overview_YYYY-MM-DD.dxf``
+    # No project_name supplied → falls back to the demo id.
+    assert "l_shape_FactoryCutPlan_Overview_" in cd
     assert cd.endswith('.dxf"')
     assert len(r.content) > 100
 
@@ -956,8 +958,8 @@ def test_export_dxf_returns_valid_dxf_when_all_assigned():
     layer_names = {layer.dxf.name for layer in doc.layers}
     # Factory writer layers — one per contractually promised surface.
     for required in (
-        "SLAB_BOUNDARIES", "SLAB_USABLE_AREA",
-        "CUT_PIECES", "PIECE_LABELS", "SLAB_INFO",
+        "SLAB_BOUNDARY", "SLAB_USABLE_AREA",
+        "CUT_PIECES", "LABELS", "DIMENSIONS",
     ):
         assert required in layer_names, layer_names
 
@@ -1013,7 +1015,7 @@ def test_export_dxf_places_cut_pieces_inside_slab_boundaries():
     msp = doc.modelspace()
     slab_rects = [
         list(lw.vertices()) for lw in msp.query("LWPOLYLINE")
-        if lw.dxf.layer == "SLAB_BOUNDARIES"
+        if lw.dxf.layer == "SLAB_BOUNDARY"
     ]
     cut_rects = [
         list(lw.vertices()) for lw in msp.query("LWPOLYLINE")
@@ -1173,6 +1175,93 @@ def test_validate_factory_fit_flags_bad_assignment():
     assert rows["p1"]["factory_ready"] is True
     assert rows["huge"]["factory_ready"] is False
     assert rows["huge"]["verdict"] in ("does_not_fit", "insufficient_margin")
+
+
+def test_export_dxf_filename_uses_sanitized_project_name():
+    """The Content-Disposition filename follows
+    ``<Project>_FactoryCutPlan_Overview_YYYY-MM-DD.dxf`` with the
+    project name sanitized so unsafe characters can't sneak into
+    the download."""
+    slab_a, slab_b = _two_slab_ids_for_assignment()
+    r = client.post(
+        "/api/demo-layouts/l_shape/export-dxf",
+        json={
+            "pieces": _two_piece_layout_pieces(),
+            "assignments": {"p1": slab_a, "p2": slab_b},
+            "project_name": "Villa Rosa 2026 / North Wing",
+        },
+    )
+    assert r.status_code == 200
+    cd = r.headers.get("content-disposition", "")
+    # Slash and space collapse to underscores; the extension survives.
+    assert "Villa_Rosa_2026_North_Wing_FactoryCutPlan_Overview_" in cd
+    assert cd.endswith('.dxf"')
+    # No suspicious characters in the delivered filename.
+    for bad in ("/", "\\", " ", "..", ":", "?", "*"):
+        assert bad not in cd.split('filename="', 1)[1].rstrip('"')
+
+
+def test_export_factory_package_returns_zip():
+    """The package endpoint returns a ZIP containing the overview
+    DXF and one DXF per assigned slab, named per the V1.1 spec."""
+    slab_a, slab_b = _two_slab_ids_for_assignment()
+    r = client.post(
+        "/api/demo-layouts/l_shape/export-factory-package",
+        json={
+            "pieces": _two_piece_layout_pieces(),
+            "assignments": {"p1": slab_a, "p2": slab_b},
+            "project_name": "Villa Rosa",
+        },
+    )
+    assert r.status_code == 200, r.text
+    assert r.headers["content-type"].startswith("application/zip")
+    cd = r.headers.get("content-disposition", "")
+    assert "Villa_Rosa_FactoryPackage_" in cd
+    assert cd.endswith('.zip"')
+
+    import io
+    import zipfile
+    zf = zipfile.ZipFile(io.BytesIO(r.content))
+    names = zf.namelist()
+    # Exactly one overview + two per-slab files.
+    overview = [n for n in names if "FactoryCutPlan_Overview_" in n]
+    slabs = [n for n in names if "_Slab_" in n]
+    assert len(overview) == 1, names
+    assert len(slabs) == 2, names
+    # Each per-slab file is itself a parseable DXF with the four
+    # spec'd factory layers.
+    import ezdxf
+    for n in slabs:
+        payload = zf.read(n)
+        doc = ezdxf.read(io.StringIO(payload.decode("utf-8")))
+        layer_names = {layer.dxf.name for layer in doc.layers}
+        for required in (
+            "SLAB_BOUNDARY", "CUT_PIECES", "DIMENSIONS", "LABELS",
+        ):
+            assert required in layer_names, (n, layer_names)
+
+
+def test_export_factory_package_refuses_bad_fit():
+    """A failing fit blocks the ZIP endpoint the same way it blocks
+    the single-DXF endpoint (same code path underneath)."""
+    slab_a, _ = _two_slab_ids_for_assignment()
+    huge = {
+        "piece_id": "huge",
+        "polygon": [[0, 0], [5000, 0], [5000, 5000], [0, 5000], [0, 0]],
+        "nominal_width_mm": 5000.0,
+        "nominal_height_mm": 5000.0,
+    }
+    r = client.post(
+        "/api/demo-layouts/l_shape/export-factory-package",
+        json={
+            "pieces": [huge],
+            "assignments": {"huge": slab_a},
+            "project_name": "Villa Rosa",
+        },
+    )
+    assert r.status_code == 400
+    detail = r.json()["detail"]
+    assert detail["error"] == "manufacturing_fit_failed"
 
 
 def test_export_dxf_polygon_uses_request_geometry():

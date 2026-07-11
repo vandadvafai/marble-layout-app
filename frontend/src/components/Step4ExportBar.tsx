@@ -8,7 +8,7 @@
 // Keeping the bar separate from PiecesPanel lets Step 2 reuse the
 // panel without dragging in the export controls.
 
-import { memo, useState } from "react";
+import { memo } from "react";
 
 import type {
   FactoryFitResponse, FactoryFitResult, ManufacturingPolicy,
@@ -36,23 +36,6 @@ interface Props {
    *  duplicate prevention, etc.). */
   inventoryValidCount: number | null;
   inventoryUnusedCount: number;
-  /** Export handlers — owned by App. Return a Promise so the bar
-   *  can show a "Exporting…" state while the export runs. Both
-   *  resolve with ``{ok, error?}`` so we can surface failures in
-   *  the bar's status text. */
-  onExportPng: () => Promise<{ ok: boolean; error?: string }>;
-  onExportDxf: () => Promise<{ ok: boolean; error?: string }>;
-  /** 0.1.52 — slab-image readiness. The PNG export must not fire
-   *  until every assigned slab image has finished loading in the
-   *  browser; otherwise the SVG serialisation captures pending
-   *  <image> elements and the resulting PNG has blank tiles. */
-  imageReadiness: {
-    total: number;
-    loaded: number;
-    failed: number;
-    pending: number;
-    isReady: boolean;
-  };
   /** 0.1.53 — manual-swap toggle. When ON the canvas piece pointer
    *  handlers switch from "select" to "drag-to-swap"; the button
    *  also turns into an active indicator in the bar. */
@@ -73,8 +56,6 @@ function Step4ExportBarImpl({
   total, assigned, unassigned, noMatch, tooSmall, duplicate,
   canAutoAssign, onAutoAssign, onClearAssignments,
   inventoryValidCount, inventoryUnusedCount,
-  onExportPng, onExportDxf,
-  imageReadiness,
   swapMode, onToggleSwapMode,
   manufacturingPolicy, onPolicyChange,
   fitResponse, fitChecking, fitError, failingFit,
@@ -82,63 +63,17 @@ function Step4ExportBarImpl({
   // "Ready to export" requires every piece assigned, with no
   // duplicate-slab conflicts AND no too-small-slab conflicts. The
   // too-small check (0.1.53) is what catches a manual swap that
-  // dropped a smaller slab on a larger piece.
+  // dropped a smaller slab on a larger piece. The actual export
+  // buttons live in the fixed bottom-right ExportActionBar; this
+  // component owns the assignment/fit signals feeding it.
   const allAssigned = total > 0
     && assigned === total
     && duplicate === 0
     && tooSmall === 0;
-  // Manufacturing fit — the last preflight response must say every
-  // piece is factory_ready, otherwise the DXF export is blocked. A
-  // missing response (still loading, or upstream conflict blocking
-  // the request) keeps the button disabled too.
   const factoryFitReady = allAssigned
     && fitResponse !== null
     && fitResponse.factory_ready
     && failingFit.length === 0;
-  // 0.1.50 — disable export buttons until every piece has a slab
-  // assigned AND no duplicate conflicts remain. ``allAssigned`` is
-  // the same predicate that lights up the "ready to export" pill.
-  //
-  // 0.1.52 — the PNG export ALSO waits until every assigned slab
-  // image has finished loading. The DXF doesn't need images, so it
-  // only gates on ``allAssigned``.
-  const pngExportReady = allAssigned && imageReadiness.isReady;
-  const dxfExportReady = factoryFitReady;
-  const [pngBusy, setPngBusy] = useState(false);
-  const [dxfBusy, setDxfBusy] = useState(false);
-  const [exportMessage, setExportMessage] = useState<
-    { kind: "ok" | "err"; text: string } | null
-  >(null);
-
-  const handleExportPng = async () => {
-    setPngBusy(true);
-    setExportMessage(null);
-    const res = await onExportPng();
-    setPngBusy(false);
-    if (res.ok) {
-      setExportMessage({ kind: "ok", text: "Client PNG downloaded." });
-    } else {
-      setExportMessage({
-        kind: "err",
-        text: `PNG export failed: ${res.error ?? "unknown error"}`,
-      });
-    }
-  };
-
-  const handleExportDxf = async () => {
-    setDxfBusy(true);
-    setExportMessage(null);
-    const res = await onExportDxf();
-    setDxfBusy(false);
-    if (res.ok) {
-      setExportMessage({ kind: "ok", text: "Factory DXF downloaded." });
-    } else {
-      setExportMessage({
-        kind: "err",
-        text: `DXF export failed: ${res.error ?? "unknown error"}`,
-      });
-    }
-  };
   return (
     <div className="step4-export-bar">
       <div className="step4-export-status">
@@ -269,75 +204,10 @@ function Step4ExportBarImpl({
         >
           Clear assignments
         </button>
-        <button
-          type="button"
-          className="step4-export-btn"
-          onClick={handleExportPng}
-          disabled={!pngExportReady || pngBusy || dxfBusy}
-          title={
-            tooSmall > 0
-              ? "Resolve the too-small slab conflicts first"
-              : duplicate > 0
-                ? "Resolve the duplicate-slab conflicts first"
-                : !allAssigned
-                  ? "Assign every piece first"
-                  : !imageReadiness.isReady
-                    ? "Waiting for slab images to load"
-                    : "Download a PNG of the current layout"
-          }
-        >
-          {pngBusy ? "Exporting…" : "Export client PNG"}
-        </button>
-        <button
-          type="button"
-          className="step4-export-btn"
-          onClick={handleExportDxf}
-          disabled={!dxfExportReady || pngBusy || dxfBusy}
-          title={
-            tooSmall > 0
-              ? "Resolve the too-small slab conflicts first"
-              : duplicate > 0
-                ? "Resolve the duplicate-slab conflicts first"
-                : !allAssigned
-                  ? "Assign every piece first"
-                  : failingFit.length > 0
-                    ? `Fix ${failingFit.length} manufacturing-fit issue(s) first`
-                    : !fitResponse
-                      ? "Running the manufacturing-fit check…"
-                      : "Download a factory DXF cut plan"
-          }
-        >
-          {dxfBusy ? "Exporting…" : "Export factory DXF"}
-        </button>
+        {/* PNG + DXF export moved to the fixed bottom-right
+            ExportActionBar in App.tsx (V1.1). Sidebar keeps
+            assignment tooling only. */}
       </div>
-
-      {/* 0.1.52 — image-readiness helper text. Only relevant once
-          every piece is assigned; before that, the "assign every
-          piece" gate is the louder signal. */}
-      {allAssigned && imageReadiness.total > 0 && !imageReadiness.isReady && (
-        <div className="step4-readiness step4-readiness-pending">
-          Preparing slab images…{" "}
-          {imageReadiness.loaded} / {imageReadiness.total} loaded
-        </div>
-      )}
-      {allAssigned && imageReadiness.failed > 0 && imageReadiness.isReady && (
-        <div className="step4-readiness step4-readiness-err">
-          {imageReadiness.failed} of {imageReadiness.total} slab images
-          failed to load. Re-upload photos or continue without missing
-          images.
-        </div>
-      )}
-
-      {exportMessage && (
-        <div className={
-          "step4-export-msg "
-          + (exportMessage.kind === "ok"
-            ? "step4-export-msg-ok"
-            : "step4-export-msg-err")
-        }>
-          {exportMessage.text}
-        </div>
-      )}
 
       {/* Manufacturing tolerances — controls the blade kerf, edge
           trim, and dimensional tolerance the factory-fit check +

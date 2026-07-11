@@ -96,6 +96,11 @@ interface Props {
    *  mutated by the canvas — only the assignments map moves. */
   swapMode?: boolean;
   onSwapAssignments?: (piece_a_id: string, piece_b_id: string) => void;
+  /** V1.1 — HTML5 drag-and-drop assignment. When a slab candidate
+   *  is dragged from the inventory sidebar and dropped on a piece
+   *  polygon, the canvas calls this with the target piece id and
+   *  the dropped slab id. Runs regardless of ``swapMode``. */
+  onAssignSlabToPiece?: (piece_id: string, slab_id: string) => void;
   /** Per-piece red-ring overlay used in Step 4 to flag pieces whose
    *  current slab is too small (typical after a manual swap). The
    *  canvas reads the set as a quick lookup; the source of truth is
@@ -186,7 +191,9 @@ export default function LayoutCanvas({
   onAddDoorway, onAddColumn, onAddGuideLine, onAddSeam,
   tileChoice, assignments, inventoryMatch,
   swapMode = false, onSwapAssignments, invalidPieceIds,
+  onAssignSlabToPiece,
 }: Props) {
+  const [dropTargetPieceId, setDropTargetPieceId] = useState<string | null>(null);
   const initialBox = useMemo<Box>(() => {
     const [x0, y0, x1, y1] = layout.target.bbox;
     const w = x1 - x0;
@@ -794,27 +801,35 @@ export default function LayoutCanvas({
             //   3. user selection
             //   4. R1 / absorbed callouts
             //   5. default edge
-            const stroke = isInvalidAssignment
-              ? STYLES.pieceFaceNoMatchEdge
-              : isSwapHover
-                ? STYLES.selectedStroke
-                : isSwapSource
+            const isDropTarget = dropTargetPieceId === p.piece_id;
+            const stroke = isDropTarget
+              ? STYLES.selectedStroke
+              : isInvalidAssignment
+                ? STYLES.pieceFaceNoMatchEdge
+                : isSwapHover
                   ? STYLES.selectedStroke
-                  : isSelected
+                  : isSwapSource
                     ? STYLES.selectedStroke
-                    : isR1
-                      ? STYLES.pieceFaceR1Edge
-                      : isAbsorbed
-                        ? STYLES.pieceFaceAbsorbedEdge
-                        : defaultEdge;
-            const strokeWidth = isInvalidAssignment
-              ? STYLES.selectedWidth
+                    : isSelected
+                      ? STYLES.selectedStroke
+                      : isR1
+                        ? STYLES.pieceFaceR1Edge
+                        : isAbsorbed
+                          ? STYLES.pieceFaceAbsorbedEdge
+                          : defaultEdge;
+            const strokeWidth =
+              isInvalidAssignment || isDropTarget
+                ? STYLES.selectedWidth
               : (isSwapSource || isSwapHover || isSelected)
                 ? STYLES.selectedWidth
                 : STYLES.pieceWidth;
             // Dashed border on the swap source so the designer can
             // tell which piece they're dragging FROM at a glance.
-            const strokeDash = isSwapSource ? "6 6" : undefined;
+            // Drop-target pieces get a dashed border too as a live
+            // "you can release here" affordance.
+            const strokeDash = isDropTarget
+              ? "8 6"
+              : isSwapSource ? "6 6" : undefined;
             return (
               <polygon
                 key={`piece:${p.piece_id}`}
@@ -841,6 +856,40 @@ export default function LayoutCanvas({
                 onPointerDown={(e) =>
                   onPointerDownPlanObject(e, { kind: "piece", id: p.piece_id })
                 }
+                onDragOver={(e) => {
+                  // Accept only our own drag payloads.
+                  const types = Array.from(e.dataTransfer.types);
+                  if (!types.includes("application/x-stonelayout")) return;
+                  e.preventDefault();
+                  e.dataTransfer.dropEffect = "copy";
+                  if (dropTargetPieceId !== p.piece_id) {
+                    setDropTargetPieceId(p.piece_id);
+                  }
+                }}
+                onDragLeave={() => {
+                  if (dropTargetPieceId === p.piece_id) {
+                    setDropTargetPieceId(null);
+                  }
+                }}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  setDropTargetPieceId(null);
+                  const raw = e.dataTransfer.getData(
+                    "application/x-stonelayout",
+                  );
+                  if (!raw) return;
+                  try {
+                    const payload = JSON.parse(raw);
+                    if (payload.kind === "slab" && payload.slab_id) {
+                      onAssignSlabToPiece?.(p.piece_id, payload.slab_id);
+                    } else if (payload.kind === "piece" && payload.piece_id) {
+                      // Piece-to-piece drop = swap.
+                      if (payload.piece_id !== p.piece_id) {
+                        onSwapAssignments?.(payload.piece_id, p.piece_id);
+                      }
+                    }
+                  } catch { /* ignore */ }
+                }}
               />
             );
           })}

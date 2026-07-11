@@ -40,6 +40,10 @@ from placement_engine.api.factory_layout import (
     MarginPolicy,
     all_factory_ready,
     build_factory_dxf_bytes,
+    build_single_slab_dxf_bytes,
+    group_by_slab,
+    sanitize_filename_component,
+    slab_filename_component,
     validate_factory_fit,
 )
 from placement_engine.api.inventory_upload import (
@@ -1022,6 +1026,11 @@ class ExportDxfRequest(BaseModel):
     ``manufacturing_policy`` controls the blade kerf, edge trim and
     dimensional tolerance the factory-fit check applies. Omit to
     use the module defaults.
+
+    ``project_name`` seeds the download filename
+    (``ProjectName_FactoryCutPlan_Overview_YYYY-MM-DD.dxf``). The
+    server sanitizes it to a filesystem-safe fragment; a missing or
+    empty value falls back to the demo id.
     """
     pieces: list[ExportDxfPiece]
     assignments: dict[str, str | None]
@@ -1033,6 +1042,7 @@ class ExportDxfRequest(BaseModel):
     manufacturing_policy: ManufacturingPolicyBody = Field(
         default_factory=ManufacturingPolicyBody,
     )
+    project_name: str | None = None
 
 
 class ValidateFactoryFitRequest(BaseModel):
@@ -1143,9 +1153,11 @@ def export_demo_dxf(demo_id: str, body: ExportDxfRequest):
         fit_results=fit_results,
     )
 
-    from datetime import datetime, timezone
-    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-    filename = f"factory_cut_plan_{demo_id}_{ts}.dxf"
+    project = sanitize_filename_component(
+        body.project_name or demo_id, fallback=demo_id,
+    )
+    from datetime import date
+    filename = _overview_filename(project, date.today().isoformat())
     from fastapi.responses import Response
     return Response(
         content=payload,
@@ -1154,6 +1166,140 @@ def export_demo_dxf(demo_id: str, body: ExportDxfRequest):
             "Content-Disposition": f'attachment; filename="{filename}"',
         },
     )
+
+
+class ExportFactoryPackageRequest(ExportDxfRequest):
+    """Same shape as ``ExportDxfRequest`` — the ZIP export is a
+    superset of the single-DXF export. The extra file is the
+    per-slab set produced by ``build_single_slab_dxf_bytes``."""
+
+
+@router.post("/api/demo-layouts/{demo_id}/export-factory-package")
+def export_demo_factory_package(
+    demo_id: str, body: ExportFactoryPackageRequest,
+):
+    """Bundle the overview DXF + one DXF per assigned slab into a
+    single ZIP that the factory operator downloads once. Same
+    manufacturing-fit gate as the single-DXF endpoint — every
+    piece must be ``factory_ready`` or the request is refused.
+
+    Filenames follow the V1.1 spec:
+      * ``<Project>_FactoryCutPlan_Overview_YYYY-MM-DD.dxf``
+      * ``<Project>_Slab_<SlabID>_CutPlan_YYYY-MM-DD.dxf``
+    where ``<Project>`` and ``<SlabID>`` are sanitized so the
+    resulting names are safe on Windows / macOS / Linux.
+    """
+    meta = DEMOS.get(demo_id)
+    if meta is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"unknown demo_id {demo_id!r}; "
+                   f"available: {sorted(DEMOS.keys())}",
+        )
+
+    unassigned = [
+        p.piece_id for p in body.pieces
+        if not body.assignments.get(p.piece_id)
+    ]
+    if not body.pieces:
+        raise HTTPException(
+            status_code=400, detail="no pieces supplied for export",
+        )
+    if unassigned:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "cannot export DXF: "
+                f"{len(unassigned)} of {len(body.pieces)} pieces are "
+                f"unassigned (first few: {unassigned[:5]})"
+            ),
+        )
+
+    try:
+        source = resolve_inventory_source(PROJECT_ROOT)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    result = load_inventory_slabs(source.path)
+    slab_by_id = {s.slab_id: s for s in result.slabs}
+
+    policy = _policy_from_body(body.manufacturing_policy)
+    assignments = _build_factory_assignments(
+        body.pieces, body.assignments,
+        slab_by_id, body.allow_rotation,
+    )
+    fit_results = validate_factory_fit(assignments, policy)
+
+    if not all_factory_ready(fit_results):
+        failing = [
+            {
+                "piece_id": r.piece_id,
+                "slab_id": r.slab_id,
+                "verdict": r.verdict,
+                "reason": r.reason,
+                "margin_width_mm": round(r.margin_width_mm, 2),
+                "margin_height_mm": round(r.margin_height_mm, 2),
+            }
+            for r in fit_results if not r.factory_ready
+        ]
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "manufacturing_fit_failed",
+                "message": (
+                    f"{len(failing)} of {len(fit_results)} pieces do not "
+                    "meet manufacturing tolerances — export is blocked."
+                ),
+                "failing": failing,
+            },
+        )
+
+    project = sanitize_filename_component(
+        body.project_name or demo_id, fallback=demo_id,
+    )
+    from datetime import date
+    today = date.today().isoformat()
+
+    overview_bytes = build_factory_dxf_bytes(
+        demo_id=demo_id,
+        assignments=assignments,
+        policy=policy,
+        fit_results=fit_results,
+    )
+
+    import io
+    import zipfile
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(_overview_filename(project, today), overview_bytes)
+        for slab_id, slab_assignments in group_by_slab(assignments).items():
+            slab_component = slab_filename_component(slab_id)
+            slab_bytes = build_single_slab_dxf_bytes(
+                slab_assignments=slab_assignments,
+                policy=policy,
+                fit_results=fit_results,
+            )
+            zf.writestr(
+                _slab_filename(project, slab_component, today),
+                slab_bytes,
+            )
+
+    from fastapi.responses import Response
+    zip_name = f"{project}_FactoryPackage_{today}.zip"
+    return Response(
+        content=buf.getvalue(),
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="{zip_name}"',
+        },
+    )
+
+
+def _overview_filename(project: str, iso_date: str) -> str:
+    return f"{project}_FactoryCutPlan_Overview_{iso_date}.dxf"
+
+
+def _slab_filename(project: str, slab_component: str, iso_date: str) -> str:
+    return f"{project}_Slab_{slab_component}_CutPlan_{iso_date}.dxf"
 
 
 # ---------------------------------------------------------------------------

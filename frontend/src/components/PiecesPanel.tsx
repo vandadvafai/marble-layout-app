@@ -151,6 +151,36 @@ function PiecesPanelImpl({
             />{" "}
             allow same slab on multiple pieces
           </label>
+          <div
+            className="pieces-unassign-target"
+            onDragOver={(e) => {
+              // Accept only piece drags — dropping a slab candidate
+              // back onto the inventory doesn't make sense.
+              const types = Array.from(e.dataTransfer.types);
+              if (types.includes("application/x-stonelayout")) {
+                e.preventDefault();
+                e.currentTarget.classList.add("pieces-unassign-target-hover");
+              }
+            }}
+            onDragLeave={(e) => {
+              e.currentTarget.classList.remove("pieces-unassign-target-hover");
+            }}
+            onDrop={(e) => {
+              e.preventDefault();
+              e.currentTarget.classList.remove("pieces-unassign-target-hover");
+              const raw = e.dataTransfer.getData("application/x-stonelayout");
+              if (!raw) return;
+              try {
+                const payload = JSON.parse(raw);
+                if (payload.kind === "piece" && payload.piece_id) {
+                  onClearAssignment?.(payload.piece_id);
+                }
+              } catch { /* ignore malformed drag */ }
+            }}
+            title="Drag an assigned piece here to remove its slab"
+          >
+            Drop a piece here to unassign
+          </div>
         </div>
       )}
       <ul className="pieces-list">
@@ -409,10 +439,26 @@ function AssignedSlabCard({
   return (
     <div
       className={
-        "piece-assigned-card"
+        "piece-assigned-card piece-assigned-card-draggable"
         + (isDuplicate ? " piece-assigned-card-duplicate" : "")
         + (isTooSmall ? " piece-assigned-card-toosmall" : "")
       }
+      draggable
+      onDragStart={(e) => {
+        // V1.1 — the assigned card is a drag SOURCE. Dragging it
+        // onto another piece = swap; onto the inventory drop-zone
+        // = unassign. Payload identifies the piece, not the slab,
+        // so the target can look up the current slab if needed.
+        const payload = JSON.stringify({
+          kind: "piece",
+          piece_id,
+          slab_id: assignedSlabId,
+        });
+        e.dataTransfer.setData("application/x-stonelayout", payload);
+        e.dataTransfer.setData("text/plain", piece_id);
+        e.dataTransfer.effectAllowed = "move";
+      }}
+      title="Drag onto another piece to swap, or onto the inventory to unassign"
     >
       <div className="piece-assigned-label">
         Assigned slab
@@ -556,11 +602,28 @@ function SlabCandidateRow({
   const wCm = Math.round(candidate.width_mm / 10);
   const hCm = Math.round(candidate.height_mm / 10);
   const wastePct = Math.round(candidate.waste_fraction * 100);
+  // V1.1 — HTML5 drag source. The payload is a JSON blob rather
+  // than a plain slab id so the canvas can tell inventory drags
+  // apart from piece-to-piece drags (which carry ``kind: "piece"``).
+  const dragProps = assignmentMode ? {
+    draggable: true,
+    onDragStart: (e: React.DragEvent<HTMLLIElement>) => {
+      const payload = JSON.stringify({
+        kind: "slab",
+        slab_id: candidate.slab_id,
+      });
+      e.dataTransfer.setData("application/x-stonelayout", payload);
+      // Fallback for browsers/tests that only surface text/plain.
+      e.dataTransfer.setData("text/plain", candidate.slab_id);
+      e.dataTransfer.effectAllowed = "copyMove";
+    },
+  } : {};
   return (
     <li className={
       "piece-slab-row"
       + (isAssignedHere ? " piece-slab-row-assigned" : "")
-    }>
+      + (assignmentMode ? " piece-slab-row-draggable" : "")
+    } {...dragProps}>
       {candidate.image_path && (
         <img
           className="piece-slab-thumb"
