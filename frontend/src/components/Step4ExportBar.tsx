@@ -10,6 +10,10 @@
 
 import { memo, useState } from "react";
 
+import type {
+  FactoryFitResponse, FactoryFitResult, ManufacturingPolicy,
+} from "../lib/exportLayout";
+
 interface Props {
   total: number;
   assigned: number;
@@ -54,6 +58,15 @@ interface Props {
    *  also turns into an active indicator in the bar. */
   swapMode: boolean;
   onToggleSwapMode: () => void;
+  /** 1.1 — manufacturing policy + preflight fit result. Both are
+   *  owned by App so a policy change re-runs the check without a
+   *  round-trip through this component's state. */
+  manufacturingPolicy: ManufacturingPolicy;
+  onPolicyChange: (next: ManufacturingPolicy) => void;
+  fitResponse: FactoryFitResponse | null;
+  fitChecking: boolean;
+  fitError: string | null;
+  failingFit: FactoryFitResult[];
 }
 
 function Step4ExportBarImpl({
@@ -63,6 +76,8 @@ function Step4ExportBarImpl({
   onExportPng, onExportDxf,
   imageReadiness,
   swapMode, onToggleSwapMode,
+  manufacturingPolicy, onPolicyChange,
+  fitResponse, fitChecking, fitError, failingFit,
 }: Props) {
   // "Ready to export" requires every piece assigned, with no
   // duplicate-slab conflicts AND no too-small-slab conflicts. The
@@ -72,6 +87,14 @@ function Step4ExportBarImpl({
     && assigned === total
     && duplicate === 0
     && tooSmall === 0;
+  // Manufacturing fit — the last preflight response must say every
+  // piece is factory_ready, otherwise the DXF export is blocked. A
+  // missing response (still loading, or upstream conflict blocking
+  // the request) keeps the button disabled too.
+  const factoryFitReady = allAssigned
+    && fitResponse !== null
+    && fitResponse.factory_ready
+    && failingFit.length === 0;
   // 0.1.50 — disable export buttons until every piece has a slab
   // assigned AND no duplicate conflicts remain. ``allAssigned`` is
   // the same predicate that lights up the "ready to export" pill.
@@ -80,7 +103,7 @@ function Step4ExportBarImpl({
   // image has finished loading. The DXF doesn't need images, so it
   // only gates on ``allAssigned``.
   const pngExportReady = allAssigned && imageReadiness.isReady;
-  const dxfExportReady = allAssigned;
+  const dxfExportReady = factoryFitReady;
   const [pngBusy, setPngBusy] = useState(false);
   const [dxfBusy, setDxfBusy] = useState(false);
   const [exportMessage, setExportMessage] = useState<
@@ -145,9 +168,14 @@ function Step4ExportBarImpl({
             {duplicate} duplicate
           </span>
         )}
-        {allAssigned && (
+        {allAssigned && factoryFitReady && (
           <span className="step4-export-pill step4-export-pill-ok">
             ready to export
+          </span>
+        )}
+        {allAssigned && !factoryFitReady && failingFit.length > 0 && (
+          <span className="step4-export-pill step4-export-pill-critical">
+            {failingFit.length} fit issue{failingFit.length === 1 ? "" : "s"}
           </span>
         )}
       </div>
@@ -270,9 +298,13 @@ function Step4ExportBarImpl({
               ? "Resolve the too-small slab conflicts first"
               : duplicate > 0
                 ? "Resolve the duplicate-slab conflicts first"
-                : dxfExportReady
-                  ? "Download a DXF cut plan for the factory"
-                  : "Assign every piece first"
+                : !allAssigned
+                  ? "Assign every piece first"
+                  : failingFit.length > 0
+                    ? `Fix ${failingFit.length} manufacturing-fit issue(s) first`
+                    : !fitResponse
+                      ? "Running the manufacturing-fit check…"
+                      : "Download a factory DXF cut plan"
           }
         >
           {dxfBusy ? "Exporting…" : "Export factory DXF"}
@@ -306,7 +338,115 @@ function Step4ExportBarImpl({
           {exportMessage.text}
         </div>
       )}
+
+      {/* Manufacturing tolerances — controls the blade kerf, edge
+          trim, and dimensional tolerance the factory-fit check +
+          DXF writer apply. Editing any value re-runs the preflight
+          check on the next App tick. */}
+      <div className="step4-mfg">
+        <div className="step4-mfg-head">
+          <span className="step4-mfg-title">Manufacturing tolerances</span>
+          <span className={
+            "step4-mfg-badge "
+            + (fitChecking
+              ? "step4-mfg-badge-checking"
+              : fitResponse === null
+                ? "step4-mfg-badge-pending"
+                : fitResponse.factory_ready
+                  ? "step4-mfg-badge-ready"
+                  : "step4-mfg-badge-blocked")
+          }>
+            {fitChecking
+              ? "Checking…"
+              : fitResponse === null
+                ? "Idle"
+                : fitResponse.factory_ready
+                  ? "Factory-ready"
+                  : `${failingFit.length} blocked`}
+          </span>
+        </div>
+        <div className="step4-mfg-inputs">
+          <PolicyInput
+            label="Blade kerf"
+            value={manufacturingPolicy.blade_kerf_mm}
+            onChange={(v) => onPolicyChange({
+              ...manufacturingPolicy, blade_kerf_mm: v,
+            })}
+          />
+          <PolicyInput
+            label="Edge trim"
+            value={manufacturingPolicy.edge_trim_mm}
+            onChange={(v) => onPolicyChange({
+              ...manufacturingPolicy, edge_trim_mm: v,
+            })}
+          />
+          <PolicyInput
+            label="Tolerance"
+            value={manufacturingPolicy.tolerance_mm}
+            onChange={(v) => onPolicyChange({
+              ...manufacturingPolicy, tolerance_mm: v,
+            })}
+          />
+        </div>
+        {fitError && (
+          <div className="step4-mfg-error">
+            Fit check failed: {fitError}
+          </div>
+        )}
+        {failingFit.length > 0 && (
+          <ul className="step4-mfg-issues">
+            {failingFit.slice(0, 6).map((r) => (
+              <li
+                key={`${r.piece_id}:${r.slab_id}`}
+                className={`step4-mfg-issue step4-mfg-issue-${r.verdict}`}
+                title={r.reason}
+              >
+                <span className="step4-mfg-issue-piece">{r.piece_id}</span>
+                <span className="step4-mfg-issue-verdict">{r.verdict}</span>
+                <span className="step4-mfg-issue-margin">
+                  margin {r.margin_width_mm.toFixed(1)}
+                  {" × "}
+                  {r.margin_height_mm.toFixed(1)} mm
+                </span>
+              </li>
+            ))}
+            {failingFit.length > 6 && (
+              <li className="step4-mfg-issue-more">
+                +{failingFit.length - 6} more…
+              </li>
+            )}
+          </ul>
+        )}
+      </div>
     </div>
+  );
+}
+
+
+function PolicyInput({
+  label, value, onChange,
+}: {
+  label: string;
+  value: number;
+  onChange: (next: number) => void;
+}) {
+  return (
+    <label className="step4-mfg-input">
+      <span className="step4-mfg-input-label">{label}</span>
+      <span className="step4-mfg-input-field">
+        <input
+          type="number"
+          min={0}
+          step={0.5}
+          value={value}
+          onChange={(e) => {
+            const parsed = Number.parseFloat(e.currentTarget.value);
+            onChange(Number.isFinite(parsed) ? Math.max(0, parsed) : 0);
+          }}
+        />
+        <span className="step4-mfg-input-unit">mm</span>
+      </span>
+    </label>
   );
 }
 

@@ -4441,3 +4441,149 @@ html, body, #root {
   font-size: 11px;
   color: var(--color-muted);
 }
+
+/* =========================================================================
+ * Step 4 — manufacturing tolerances + fit gating (V1)
+ * ========================================================================= */
+.step4-mfg {
+  margin-top: var(--space-3);
+  padding: var(--space-3);
+  background: var(--color-surface-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-card);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.step4-mfg-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.step4-mfg-title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--color-muted);
+}
+.step4-mfg-badge {
+  padding: 3px 10px;
+  border-radius: var(--radius-pill);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+.step4-mfg-badge-ready {
+  background: var(--color-green-soft);
+  color: #166534;
+}
+.step4-mfg-badge-checking {
+  background: var(--color-blue-soft);
+  color: var(--color-blue-ink);
+}
+.step4-mfg-badge-pending {
+  background: var(--color-grey-soft);
+  color: var(--color-muted);
+}
+.step4-mfg-badge-blocked {
+  background: var(--color-red-soft);
+  color: #991b1b;
+}
+.step4-mfg-inputs {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+.step4-mfg-input {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11px;
+}
+.step4-mfg-input-label {
+  font-weight: 600;
+  color: var(--color-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 10px;
+}
+.step4-mfg-input-field {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-control);
+  background: var(--color-surface);
+  overflow: hidden;
+}
+.step4-mfg-input-field input {
+  flex: 1 1 auto;
+  border: none;
+  outline: none;
+  padding: 6px 8px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  background: transparent;
+  color: var(--color-text);
+  width: 100%;
+}
+.step4-mfg-input-unit {
+  padding: 0 8px;
+  font-size: 10px;
+  color: var(--color-muted);
+  font-weight: 600;
+}
+.step4-mfg-error {
+  font-size: 12px;
+  color: #991b1b;
+  background: var(--color-red-soft);
+  border-radius: var(--radius-control);
+  padding: 6px 10px;
+}
+.step4-mfg-issues {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.step4-mfg-issue {
+  display: grid;
+  grid-template-columns: minmax(80px, 1fr) auto auto;
+  gap: 8px;
+  align-items: baseline;
+  padding: 6px 10px;
+  background: var(--color-red-soft);
+  border-radius: var(--radius-control);
+  font-size: 11px;
+  color: #991b1b;
+}
+.step4-mfg-issue-tight {
+  background: var(--color-amber-soft);
+  color: #92400e;
+}
+.step4-mfg-issue-piece {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.step4-mfg-issue-verdict {
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 10px;
+}
+.step4-mfg-issue-margin {
+  font-variant-numeric: tabular-nums;
+  font-size: 10px;
+}
+.step4-mfg-issue-more {
+  font-size: 11px;
+  color: var(--color-muted);
+  padding-left: 4px;
+}

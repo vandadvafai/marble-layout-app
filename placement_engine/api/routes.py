@@ -35,6 +35,13 @@ from placement_engine.api.inventory_source import (
 from placement_engine.api.dxf_export import (
     DxfPieceInput, build_dxf_bytes,
 )
+from placement_engine.api.factory_layout import (
+    AssignmentInput,
+    MarginPolicy,
+    all_factory_ready,
+    build_factory_dxf_bytes,
+    validate_factory_fit,
+)
 from placement_engine.api.inventory_upload import (
     clear_active_upload, get_active_upload, process_upload,
 )
@@ -994,6 +1001,15 @@ class ExportDxfPiece(BaseModel):
     nominal_height_mm: float
 
 
+class ManufacturingPolicyBody(BaseModel):
+    """Configurable manufacturing tolerances the fit check + writer
+    honour. All values are millimetres. Defaults match
+    ``placement_engine.api.factory_layout.MarginPolicy``."""
+    blade_kerf_mm: float = Field(default=3.0, ge=0.0)
+    edge_trim_mm: float = Field(default=5.0, ge=0.0)
+    tolerance_mm: float = Field(default=2.0, ge=0.0)
+
+
 class ExportDxfRequest(BaseModel):
     """POST body for the DXF export endpoint.
 
@@ -1001,14 +1017,34 @@ class ExportDxfRequest(BaseModel):
     locked in at Step 2 → 3) plus the piece_id → slab_id map. The
     backend resolves slab metadata from the active inventory so the
     request stays small and the file stays consistent with whatever
-    inventory the matcher is currently using."""
+    inventory the matcher is currently using.
+
+    ``manufacturing_policy`` controls the blade kerf, edge trim and
+    dimensional tolerance the factory-fit check applies. Omit to
+    use the module defaults.
+    """
     pieces: list[ExportDxfPiece]
     assignments: dict[str, str | None]
-    # Optional plan annotations — emitted on their own DXF layers
-    # when present.
+    # Optional plan annotations — retained for the legacy floor-DXF
+    # writer. The factory writer ignores them.
     doorways: list[list[list[float]]] = Field(default_factory=list)
     seams: list[list[list[float]]] = Field(default_factory=list)
     allow_rotation: bool = True
+    manufacturing_policy: ManufacturingPolicyBody = Field(
+        default_factory=ManufacturingPolicyBody,
+    )
+
+
+class ValidateFactoryFitRequest(BaseModel):
+    """Request body for the preflight fit endpoint. Same piece +
+    assignment shape as ``ExportDxfRequest`` so the frontend can
+    reuse its serializer, but without the plan-annotation fields."""
+    pieces: list[ExportDxfPiece]
+    assignments: dict[str, str | None]
+    allow_rotation: bool = True
+    manufacturing_policy: ManufacturingPolicyBody = Field(
+        default_factory=ManufacturingPolicyBody,
+    )
 
 
 @router.post("/api/demo-layouts/{demo_id}/export-dxf")
@@ -1056,11 +1092,9 @@ def export_demo_dxf(demo_id: str, body: ExportDxfRequest):
             ),
         )
 
-    geometry = load_target_geometry_from_dxf(dxf_path)
-
-    # Resolve slab metadata for label text. Looking it up via the
-    # matcher gives us the same width / cut / waste numbers the UI
-    # is showing.
+    # Resolve slab metadata (dimensions + serial) for the factory
+    # layout. Same source the matcher uses so what the operator sees
+    # in the DXF matches what the Step-4 UI showed.
     try:
         source = resolve_inventory_source(PROJECT_ROOT)
     except FileNotFoundError as exc:
@@ -1068,51 +1102,45 @@ def export_demo_dxf(demo_id: str, body: ExportDxfRequest):
     result = load_inventory_slabs(source.path)
     slab_by_id = {s.slab_id: s for s in result.slabs}
 
-    # Walk pieces, build DxfPieceInputs. Re-run match_piece per
-    # piece so we get the rotation_needed + waste_fraction even if
-    # the matcher response was stale.
-    dxf_pieces: list[DxfPieceInput] = []
-    for p in body.pieces:
-        slab_id = body.assignments[p.piece_id]
-        # ``slab_id`` is non-empty here (we returned 400 earlier).
-        assert slab_id is not None
-        slab = slab_by_id.get(slab_id)
-        slab_w = float(slab.width_mm) if slab else None
-        slab_h = float(slab.height_mm) if slab else None
-        # Re-derive the candidate's rotation + waste from the
-        # matcher so the DXF labels match what the UI showed.
-        rotation_needed = False
-        waste_fraction: float | None = None
-        if slab is not None:
-            status, candidates = match_piece(
-                p.nominal_width_mm, p.nominal_height_mm,
-                [slab],
-                allow_rotation=body.allow_rotation,
-            )
-            if candidates:
-                rotation_needed = candidates[0].rotation_needed
-                waste_fraction = candidates[0].waste_fraction
-        dxf_pieces.append(DxfPieceInput(
-            piece_id=p.piece_id,
-            polygon=[(x, y) for x, y in p.polygon],
-            nominal_width_mm=p.nominal_width_mm,
-            nominal_height_mm=p.nominal_height_mm,
-            slab_id=slab_id,
-            slab_width_mm=slab_w,
-            slab_height_mm=slab_h,
-            cut_width_mm=p.nominal_width_mm,
-            cut_height_mm=p.nominal_height_mm,
-            rotation_needed=rotation_needed,
-            waste_fraction=waste_fraction,
-        ))
+    policy = _policy_from_body(body.manufacturing_policy)
+    assignments = _build_factory_assignments(
+        body.pieces, body.assignments,
+        slab_by_id, body.allow_rotation,
+    )
+    fit_results = validate_factory_fit(assignments, policy)
 
-    payload = build_dxf_bytes(
+    # Any failing piece blocks the export — the factory can't act on
+    # a partial cut plan and a warned-only DXF invites production
+    # mistakes.
+    if not all_factory_ready(fit_results):
+        failing = [
+            {
+                "piece_id": r.piece_id,
+                "slab_id": r.slab_id,
+                "verdict": r.verdict,
+                "reason": r.reason,
+                "margin_width_mm": round(r.margin_width_mm, 2),
+                "margin_height_mm": round(r.margin_height_mm, 2),
+            }
+            for r in fit_results if not r.factory_ready
+        ]
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "manufacturing_fit_failed",
+                "message": (
+                    f"{len(failing)} of {len(fit_results)} pieces do not "
+                    "meet manufacturing tolerances — export is blocked."
+                ),
+                "failing": failing,
+            },
+        )
+
+    payload = build_factory_dxf_bytes(
         demo_id=demo_id,
-        boundary=[(pt[0], pt[1]) for pt in geometry.boundary],
-        holes=[[(pt[0], pt[1]) for pt in hole] for hole in (geometry.holes or [])],
-        pieces=dxf_pieces,
-        seams=[[(pt[0], pt[1]) for pt in seg] for seg in body.seams],
-        doorways=[[(pt[0], pt[1]) for pt in seg] for seg in body.doorways],
+        assignments=assignments,
+        policy=policy,
+        fit_results=fit_results,
     )
 
     from datetime import datetime, timezone
@@ -1126,3 +1154,128 @@ def export_demo_dxf(demo_id: str, body: ExportDxfRequest):
             "Content-Disposition": f'attachment; filename="{filename}"',
         },
     )
+
+
+# ---------------------------------------------------------------------------
+# Preflight fit check — read-only endpoint the frontend calls before
+# enabling the "Export factory DXF" button. Same code path the export
+# endpoint uses internally, so the two never disagree.
+# ---------------------------------------------------------------------------
+
+
+@router.post("/api/demo-layouts/{demo_id}/validate-factory-fit")
+def validate_demo_factory_fit(demo_id: str, body: ValidateFactoryFitRequest):
+    if demo_id not in DEMOS:
+        raise HTTPException(
+            status_code=404,
+            detail=f"unknown demo_id {demo_id!r}; "
+                   f"available: {sorted(DEMOS.keys())}",
+        )
+    if not body.pieces:
+        return {
+            "results": [],
+            "factory_ready": False,
+            "reason": "no pieces supplied",
+        }
+    try:
+        source = resolve_inventory_source(PROJECT_ROOT)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    result = load_inventory_slabs(source.path)
+    slab_by_id = {s.slab_id: s for s in result.slabs}
+
+    policy = _policy_from_body(body.manufacturing_policy)
+    assignments = _build_factory_assignments(
+        body.pieces, body.assignments,
+        slab_by_id, body.allow_rotation,
+    )
+    fit_results = validate_factory_fit(assignments, policy)
+    return {
+        "policy": {
+            "blade_kerf_mm": policy.blade_kerf_mm,
+            "edge_trim_mm": policy.edge_trim_mm,
+            "tolerance_mm": policy.tolerance_mm,
+        },
+        "results": [_fit_result_to_dict(r) for r in fit_results],
+        "factory_ready": all_factory_ready(fit_results),
+        "unassigned_count": sum(
+            1 for p in body.pieces if not body.assignments.get(p.piece_id)
+        ),
+    }
+
+
+def _policy_from_body(body: ManufacturingPolicyBody) -> MarginPolicy:
+    return MarginPolicy(
+        blade_kerf_mm=body.blade_kerf_mm,
+        edge_trim_mm=body.edge_trim_mm,
+        tolerance_mm=body.tolerance_mm,
+    )
+
+
+def _build_factory_assignments(
+    pieces: list[ExportDxfPiece],
+    assignments: dict[str, str | None],
+    slab_by_id: dict,
+    allow_rotation: bool,
+) -> list[AssignmentInput]:
+    """Turn the wire payload into ``AssignmentInput`` records the
+    fit checker + writer consume. Re-runs the matcher per piece so
+    the rotation and waste fields agree with what the UI showed."""
+    out: list[AssignmentInput] = []
+    for p in pieces:
+        slab_id = assignments.get(p.piece_id)
+        if not slab_id:
+            continue  # caller has already refused these cases
+        slab = slab_by_id.get(slab_id)
+        slab_w = float(slab.width_mm) if slab else 0.0
+        slab_h = float(slab.height_mm) if slab else 0.0
+        slab_serial = getattr(slab, "serial_number", None) if slab else None
+
+        rotation_needed = False
+        waste_fraction: float | None = None
+        cut_w = p.nominal_width_mm
+        cut_h = p.nominal_height_mm
+        if slab is not None:
+            status, candidates = match_piece(
+                p.nominal_width_mm, p.nominal_height_mm,
+                [slab],
+                allow_rotation=allow_rotation,
+            )
+            if candidates:
+                rotation_needed = candidates[0].rotation_needed
+                waste_fraction = candidates[0].waste_fraction
+                cut_w = candidates[0].cut_width_mm
+                cut_h = candidates[0].cut_height_mm
+
+        out.append(AssignmentInput(
+            piece_id=p.piece_id,
+            polygon=[(x, y) for x, y in p.polygon],
+            cut_width_mm=cut_w,
+            cut_height_mm=cut_h,
+            slab_id=slab_id,
+            slab_width_mm=slab_w,
+            slab_height_mm=slab_h,
+            rotation_needed=rotation_needed,
+            waste_fraction=waste_fraction,
+            slab_serial=slab_serial,
+        ))
+    return out
+
+
+def _fit_result_to_dict(r) -> dict:
+    return {
+        "piece_id": r.piece_id,
+        "slab_id": r.slab_id,
+        "verdict": r.verdict,
+        "factory_ready": r.factory_ready,
+        "reason": r.reason,
+        "piece_width_mm": round(r.piece_width_mm, 2),
+        "piece_height_mm": round(r.piece_height_mm, 2),
+        "slab_width_mm": round(r.slab_width_mm, 2),
+        "slab_height_mm": round(r.slab_height_mm, 2),
+        "rotation_needed": r.rotation_needed,
+        "usable_width_mm": round(r.usable_width_mm, 2),
+        "usable_height_mm": round(r.usable_height_mm, 2),
+        "margin_width_mm": round(r.margin_width_mm, 2),
+        "margin_height_mm": round(r.margin_height_mm, 2),
+    }

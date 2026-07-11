@@ -192,6 +192,101 @@ export async function exportClientPng(
 }
 
 
+/** Manufacturing tolerances the factory writer + fit checker honour.
+ *  Defaults mirror ``placement_engine.api.factory_layout.MarginPolicy``
+ *  so a caller that doesn't override anything gets the same numbers
+ *  the backend would have used. All values are in millimetres. */
+export interface ManufacturingPolicy {
+  blade_kerf_mm: number;
+  edge_trim_mm: number;
+  tolerance_mm: number;
+}
+
+export const DEFAULT_MANUFACTURING_POLICY: ManufacturingPolicy = {
+  blade_kerf_mm: 3.0,
+  edge_trim_mm: 5.0,
+  tolerance_mm: 2.0,
+};
+
+/** Per-piece verdict from the preflight fit endpoint. Mirrors the
+ *  ``FactoryFitResult`` dataclass on the backend one field for one
+ *  field. */
+export interface FactoryFitResult {
+  piece_id: string;
+  slab_id: string;
+  verdict: "ready" | "tight" | "insufficient_margin"
+    | "does_not_fit" | "unknown_slab";
+  factory_ready: boolean;
+  reason: string;
+  piece_width_mm: number;
+  piece_height_mm: number;
+  slab_width_mm: number;
+  slab_height_mm: number;
+  rotation_needed: boolean;
+  usable_width_mm: number;
+  usable_height_mm: number;
+  margin_width_mm: number;
+  margin_height_mm: number;
+}
+
+export interface FactoryFitResponse {
+  policy: ManufacturingPolicy;
+  results: FactoryFitResult[];
+  factory_ready: boolean;
+  unassigned_count?: number;
+}
+
+/** Run the backend's preflight fit check and return per-piece
+ *  verdicts. Called by the Step-4 export bar before enabling the
+ *  Export DXF button — the same code path the export endpoint uses
+ *  internally, so a passing preflight guarantees the download will
+ *  succeed. */
+export async function validateFactoryFit(
+  demoId: string,
+  pieces: Piece[],
+  assignments: Assignments,
+  policy: ManufacturingPolicy = DEFAULT_MANUFACTURING_POLICY,
+): Promise<
+  { ok: true; response: FactoryFitResponse }
+  | { ok: false; error: string }
+> {
+  const body = {
+    pieces: pieces.map((p) => {
+      const cut = cutDimsForPiece(p);
+      return {
+        piece_id: p.piece_id,
+        polygon: p.polygon,
+        nominal_width_mm: cut.width_mm,
+        nominal_height_mm: cut.height_mm,
+      };
+    }),
+    assignments,
+    manufacturing_policy: policy,
+  };
+  let res: Response;
+  try {
+    res = await fetch(
+      `/api/demo-layouts/${encodeURIComponent(demoId)}/validate-factory-fit`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    );
+  } catch (e) {
+    return { ok: false, error: (e as Error).message };
+  }
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    return {
+      ok: false,
+      error: `Fit check failed (${res.status}): ${detail || res.statusText}`,
+    };
+  }
+  const response = (await res.json()) as FactoryFitResponse;
+  return { ok: true, response };
+}
+
 /** POST the current finalisation + assignments to the backend's
  *  ``export-dxf`` endpoint and download the response. The backend
  *  owns DXF generation (ezdxf) and returns a Content-Disposition
@@ -202,7 +297,11 @@ export async function exportFactoryDxf(
   assignments: Assignments,
   doorways: Array<[[number, number], [number, number]]> = [],
   seams: Array<[[number, number], [number, number]]> = [],
-): Promise<{ ok: true; filename: string } | { ok: false; error: string }> {
+  policy: ManufacturingPolicy = DEFAULT_MANUFACTURING_POLICY,
+): Promise<
+  { ok: true; filename: string }
+  | { ok: false; error: string; failing?: FactoryFitResult[] }
+> {
   // Send polygon-derived REAL cut dimensions in the request's
   // ``nominal_width_mm`` / ``nominal_height_mm`` fields. The field
   // names predate this clarification — semantically these are
@@ -222,6 +321,7 @@ export async function exportFactoryDxf(
     assignments,
     doorways,
     seams,
+    manufacturing_policy: policy,
   };
   let res: Response;
   try {
@@ -237,16 +337,26 @@ export async function exportFactoryDxf(
     return { ok: false, error: (e as Error).message };
   }
   if (!res.ok) {
-    let detail = "";
+    let detailMsg = "";
+    let failing: FactoryFitResult[] | undefined;
     try {
       const j = await res.json();
-      detail = j?.detail ?? "";
+      const d = j?.detail;
+      if (d && typeof d === "object" && d.error === "manufacturing_fit_failed") {
+        detailMsg = d.message ?? "Manufacturing fit check failed.";
+        failing = d.failing as FactoryFitResult[];
+      } else if (typeof d === "string") {
+        detailMsg = d;
+      } else {
+        detailMsg = JSON.stringify(d);
+      }
     } catch {
-      detail = await res.text().catch(() => "");
+      detailMsg = await res.text().catch(() => "");
     }
     return {
       ok: false,
-      error: `DXF export failed (${res.status}): ${detail || res.statusText}`,
+      error: `DXF export failed (${res.status}): ${detailMsg || res.statusText}`,
+      failing,
     };
   }
   const blob = await res.blob();

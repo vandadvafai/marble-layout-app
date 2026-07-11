@@ -932,8 +932,8 @@ def test_export_dxf_404_on_unknown_demo():
 
 
 def test_export_dxf_returns_valid_dxf_when_all_assigned():
-    """Happy path: every piece assigned → endpoint returns a DXF
-    that ezdxf can re-parse, with the expected layers."""
+    """Happy path: every piece assigned → endpoint returns a factory
+    DXF that ezdxf can re-parse, with the expected factory layers."""
     slab_a, slab_b = _two_slab_ids_for_assignment()
     r = client.post(
         "/api/demo-layouts/l_shape/export-dxf",
@@ -948,24 +948,24 @@ def test_export_dxf_returns_valid_dxf_when_all_assigned():
     assert cd.startswith("attachment")
     assert "factory_cut_plan_l_shape_" in cd
     assert cd.endswith('.dxf"')
-    assert len(r.content) > 100  # DXFs are at LEAST this large
+    assert len(r.content) > 100
 
-    # Re-parse to confirm it's a real DXF that downstream tools can
-    # open. ezdxf raises on malformed input.
     import io
     import ezdxf
     doc = ezdxf.read(io.StringIO(r.content.decode("utf-8")))
     layer_names = {layer.dxf.name for layer in doc.layers}
+    # Factory writer layers — one per contractually promised surface.
     for required in (
-        "FLOOR_BOUNDARY", "CUT_PIECES", "PIECE_LABELS",
-        "SLAB_LABELS", "DOORWAYS", "SEAMS",
+        "SLAB_BOUNDARIES", "SLAB_USABLE_AREA",
+        "CUT_PIECES", "PIECE_LABELS", "SLAB_INFO",
     ):
-        assert required in layer_names
+        assert required in layer_names, layer_names
 
 
 def test_export_dxf_contains_piece_and_slab_labels():
-    """Labels are part of the contract — verify both the piece_id
-    and the assigned slab_id appear as TEXT entities."""
+    """Labels are part of the contract — verify piece_ids appear as
+    TEXT entities, and the slab id shows up inside a SLAB_INFO
+    header line (``SLAB {slab_id} · S/N ...``)."""
     slab_a, slab_b = _two_slab_ids_for_assignment()
     r = client.post(
         "/api/demo-layouts/l_shape/export-dxf",
@@ -981,10 +981,198 @@ def test_export_dxf_contains_piece_and_slab_labels():
     doc = ezdxf.read(io.StringIO(r.content.decode("utf-8")))
     msp = doc.modelspace()
     text_strings = [e.dxf.text for e in msp.query("TEXT")]
+    # Piece ids are their own labels.
     assert "p1" in text_strings
     assert "p2" in text_strings
-    assert slab_a in text_strings
-    assert slab_b in text_strings
+    # Slab ids land inside the SLAB_INFO header line so a plain
+    # substring check across every TEXT entity is what the caller
+    # actually reads.
+    all_text = " ".join(text_strings)
+    assert slab_a in all_text
+    assert slab_b in all_text
+
+
+def test_export_dxf_places_cut_pieces_inside_slab_boundaries():
+    """REGRESSION for the "factory vs. floor" upgrade: every cut
+    contour must lie entirely inside the slab boundary rectangle
+    that the writer emitted for it, otherwise the DXF is a floor
+    reconstruction and not a factory cut plan."""
+    slab_a, slab_b = _two_slab_ids_for_assignment()
+    r = client.post(
+        "/api/demo-layouts/l_shape/export-dxf",
+        json={
+            "pieces": _two_piece_layout_pieces(),
+            "assignments": {"p1": slab_a, "p2": slab_b},
+        },
+    )
+    assert r.status_code == 200
+
+    import io
+    import ezdxf
+    doc = ezdxf.read(io.StringIO(r.content.decode("utf-8")))
+    msp = doc.modelspace()
+    slab_rects = [
+        list(lw.vertices()) for lw in msp.query("LWPOLYLINE")
+        if lw.dxf.layer == "SLAB_BOUNDARIES"
+    ]
+    cut_rects = [
+        list(lw.vertices()) for lw in msp.query("LWPOLYLINE")
+        if lw.dxf.layer == "CUT_PIECES"
+    ]
+    # Two assigned pieces → two slabs → two cuts. Each cut must fit
+    # inside at least one of the slab boundaries.
+    assert len(slab_rects) == 2
+    assert len(cut_rects) == 2
+    for cut in cut_rects:
+        cxs = [v[0] for v in cut]
+        cys = [v[1] for v in cut]
+        cx0, cx1 = min(cxs), max(cxs)
+        cy0, cy1 = min(cys), max(cys)
+        contained = False
+        for slab in slab_rects:
+            sxs = [v[0] for v in slab]
+            sys = [v[1] for v in slab]
+            sx0, sx1 = min(sxs), max(sxs)
+            sy0, sy1 = min(sys), max(sys)
+            if cx0 >= sx0 - 0.5 and cx1 <= sx1 + 0.5 \
+                    and cy0 >= sy0 - 0.5 and cy1 <= sy1 + 0.5:
+                contained = True
+                break
+        assert contained, (
+            f"cut piece bbox ({cx0:.1f},{cy0:.1f})–({cx1:.1f},{cy1:.1f}) "
+            "does not fit inside any SLAB_BOUNDARIES rectangle"
+        )
+
+
+def test_export_dxf_rejects_insufficient_margin():
+    """Tight cut (piece almost as large as the slab) must be refused
+    by the manufacturing-fit gate. The endpoint returns 400 with the
+    per-piece verdict so the frontend can surface it."""
+    slab_a, _ = _two_slab_ids_for_assignment()
+    # A comically large piece: 5 m × 5 m — much larger than every
+    # slab in the sample inventory, so the fit check must reject.
+    huge_piece = {
+        "piece_id": "huge",
+        "polygon": [[0, 0], [5000, 0], [5000, 5000], [0, 5000], [0, 0]],
+        "nominal_width_mm": 5000.0,
+        "nominal_height_mm": 5000.0,
+    }
+    r = client.post(
+        "/api/demo-layouts/l_shape/export-dxf",
+        json={
+            "pieces": [huge_piece],
+            "assignments": {"huge": slab_a},
+        },
+    )
+    assert r.status_code == 400
+    detail = r.json()["detail"]
+    assert detail["error"] == "manufacturing_fit_failed"
+    assert detail["failing"], "expected a failing entry"
+    assert detail["failing"][0]["piece_id"] == "huge"
+
+
+def test_export_dxf_rejects_zero_margin_fit():
+    """Zero-margin fits must NOT be marked factory-ready. The fit
+    check reports ``tight`` and the export is blocked. This test
+    forces the condition by cranking the kerf so a normal 500 × 500
+    cut lands exactly on the usable-area edge."""
+    slab_a, _ = _two_slab_ids_for_assignment()
+    # Look up the slab's real dimensions so we can dial the policy
+    # to make ``usable == piece`` (zero margin).
+    match = client.post(
+        "/api/demo-layouts/l_shape/match-inventory",
+        json={"pieces": [{"piece_id": "p1", "nominal_width_mm": 500,
+                          "nominal_height_mm": 500}]},
+    ).json()
+    slab = next(
+        c for c in match["pieces"][0]["candidates"] if c["slab_id"] == slab_a
+    )
+    slab_w = slab["width_mm"]
+    slab_h = slab["height_mm"]
+    # Choose (edge_trim, kerf) so usable - required == 0 on each axis.
+    edge_trim = 5.0
+    kerf = (min(slab_w, slab_h) - 2.0 * edge_trim - 500.0) / 2.0
+    body = {
+        "pieces": [{
+            "piece_id": "p1",
+            "polygon": [[0, 0], [500, 0], [500, 500], [0, 500], [0, 0]],
+            "nominal_width_mm": 500.0,
+            "nominal_height_mm": 500.0,
+        }],
+        "assignments": {"p1": slab_a},
+        "manufacturing_policy": {
+            "blade_kerf_mm": kerf,
+            "edge_trim_mm": edge_trim,
+            "tolerance_mm": 0.0,
+        },
+    }
+    r = client.post("/api/demo-layouts/l_shape/export-dxf", json=body)
+    assert r.status_code == 400
+    detail = r.json()["detail"]
+    assert detail["error"] == "manufacturing_fit_failed"
+    verdicts = {f["verdict"] for f in detail["failing"]}
+    assert "tight" in verdicts, detail
+
+
+def test_validate_factory_fit_reports_ready_and_tight():
+    """Preflight endpoint the frontend calls to gate the button.
+    Returns a per-piece verdict + a top-level factory_ready flag."""
+    slab_a, slab_b = _two_slab_ids_for_assignment()
+    r = client.post(
+        "/api/demo-layouts/l_shape/validate-factory-fit",
+        json={
+            "pieces": _two_piece_layout_pieces(),
+            "assignments": {"p1": slab_a, "p2": slab_b},
+        },
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert "policy" in body
+    assert "results" in body
+    assert body["factory_ready"] is True
+    assert len(body["results"]) == 2
+    for row in body["results"]:
+        assert row["verdict"] == "ready"
+        assert row["factory_ready"] is True
+        # Margin must be positive on both axes for a ready verdict.
+        assert row["margin_width_mm"] > 0
+        assert row["margin_height_mm"] > 0
+
+
+def test_validate_factory_fit_flags_bad_assignment():
+    """Preflight surfaces the failing verdicts even when other
+    pieces pass, so the frontend can highlight only the affected
+    rows without blocking the caller."""
+    slab_a, _ = _two_slab_ids_for_assignment()
+    r = client.post(
+        "/api/demo-layouts/l_shape/validate-factory-fit",
+        json={
+            "pieces": [
+                {
+                    "piece_id": "p1",
+                    "polygon": [[0, 0], [500, 0], [500, 500],
+                                [0, 500], [0, 0]],
+                    "nominal_width_mm": 500.0,
+                    "nominal_height_mm": 500.0,
+                },
+                {
+                    "piece_id": "huge",
+                    "polygon": [[0, 0], [4000, 0], [4000, 4000],
+                                [0, 4000], [0, 0]],
+                    "nominal_width_mm": 4000.0,
+                    "nominal_height_mm": 4000.0,
+                },
+            ],
+            "assignments": {"p1": slab_a, "huge": slab_a},
+        },
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["factory_ready"] is False
+    rows = {r["piece_id"]: r for r in body["results"]}
+    assert rows["p1"]["factory_ready"] is True
+    assert rows["huge"]["factory_ready"] is False
+    assert rows["huge"]["verdict"] in ("does_not_fit", "insufficient_margin")
 
 
 def test_export_dxf_polygon_uses_request_geometry():

@@ -53,7 +53,11 @@ import {
   summarizeAssignments, swapAssignments,
 } from "./lib/finalAssign";
 import {
-  exportClientPng, exportFactoryDxf,
+  DEFAULT_MANUFACTURING_POLICY,
+  exportClientPng, exportFactoryDxf, validateFactoryFit,
+} from "./lib/exportLayout";
+import type {
+  FactoryFitResponse, FactoryFitResult, ManufacturingPolicy,
 } from "./lib/exportLayout";
 import {
   getAssignedImageRefs, useSlabImagesReady,
@@ -203,6 +207,16 @@ export default function App() {
   // assignments. Geometry / cuts are NEVER mutated by a swap —
   // see ``onSwapAssignments`` below.
   const [swapMode, setSwapMode] = useState(false);
+  // Manufacturing-fit gating (Step 4). Policy is user-editable via
+  // the Step-4 export bar; ``fitResponse`` is the last preflight
+  // result the frontend fetched. Export stays disabled until every
+  // piece reports ``factory_ready: true``.
+  const [manufacturingPolicy, setManufacturingPolicy] = useState<ManufacturingPolicy>(
+    DEFAULT_MANUFACTURING_POLICY,
+  );
+  const [fitResponse, setFitResponse] = useState<FactoryFitResponse | null>(null);
+  const [fitChecking, setFitChecking] = useState(false);
+  const [fitError, setFitError] = useState<string | null>(null);
   // Step-lock message banner. Set when the designer clicks a chip
   // whose prerequisites aren't met (typically Step 4 before Step 3
   // is complete); cleared automatically after a few seconds or on
@@ -811,8 +825,9 @@ export default function App() {
     return exportFactoryDxf(
       data.demo_id, finalization.pieces, assignments,
       doorways, seamSegments,
+      manufacturingPolicy,
     );
-  }, [data, finalization, assignments, editedPlan]);
+  }, [data, finalization, assignments, editedPlan, manufacturingPolicy]);
 
   // 0.1.43 — when the Step-3 upload changes (new upload or clear),
   // refresh the resolved-inventory chip AND invalidate the Step-4
@@ -1085,6 +1100,54 @@ export default function App() {
       });
   }, [currentStep, data, finalization, inventoryInfo]);
 
+  // Manufacturing-fit preflight. Runs whenever the designer is on
+  // Step 4 with a fully-assigned layout or changes the policy. The
+  // export button reads ``fitResponse.factory_ready`` to gate the
+  // download; the export bar lists any failing pieces so the
+  // designer can react without waiting for the eventual 400 from
+  // the export endpoint.
+  const fitCheckTokenRef = useRef(0);
+  useEffect(() => {
+    if (currentStep !== 4 || !data || !finalization) {
+      setFitResponse(null);
+      setFitError(null);
+      return;
+    }
+    const pieceIds = finalization.pieces.map((p) => p.piece_id);
+    const allAssigned = pieceIds.length > 0
+      && pieceIds.every((pid) => !!assignments[pid]);
+    if (!allAssigned) {
+      setFitResponse(null);
+      setFitError(null);
+      return;
+    }
+    const token = ++fitCheckTokenRef.current;
+    setFitChecking(true);
+    setFitError(null);
+    validateFactoryFit(
+      data.demo_id, finalization.pieces, assignments, manufacturingPolicy,
+    )
+      .then((res) => {
+        if (fitCheckTokenRef.current !== token) return;
+        if (res.ok) {
+          setFitResponse(res.response);
+        } else {
+          setFitError(res.error);
+          setFitResponse(null);
+        }
+      })
+      .finally(() => {
+        if (fitCheckTokenRef.current === token) setFitChecking(false);
+      });
+  }, [
+    currentStep, data, finalization, assignments, manufacturingPolicy,
+  ]);
+
+  const failingFitResults: FactoryFitResult[] = useMemo(
+    () => (fitResponse?.results ?? []).filter((r) => !r.factory_ready),
+    [fitResponse],
+  );
+
   return (
     <div className="app">
       <StepperHeader
@@ -1343,6 +1406,12 @@ export default function App() {
               onExportPng={onExportPng}
               onExportDxf={onExportDxf}
               imageReadiness={imageReadiness}
+              manufacturingPolicy={manufacturingPolicy}
+              onPolicyChange={setManufacturingPolicy}
+              fitResponse={fitResponse}
+              fitChecking={fitChecking}
+              fitError={fitError}
+              failingFit={failingFitResults}
             />
             <PiecesPanel
               pieces={finalization.pieces}
