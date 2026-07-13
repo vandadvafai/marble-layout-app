@@ -139,10 +139,24 @@ export async function uploadInventory(
     body: form,
   });
   if (!res.ok) {
-    const detail = await res.text().catch(() => "");
+    // Structured errors have a JSON body like
+    // ``{"detail":{"error":"invalid_excel","message":"..."}}``.
+    // Fall back to the raw text for older / non-JSON errors.
+    let message: string | null = null;
+    try {
+      const body = await res.json();
+      const d = body?.detail;
+      if (d && typeof d === "object" && typeof d.message === "string") {
+        message = d.message;
+      } else if (typeof d === "string") {
+        message = d;
+      }
+    } catch {
+      message = await res.text().catch(() => "");
+    }
     throw new Error(
-      `Upload failed: ${res.status} ${res.statusText}` +
-      (detail ? ` — ${detail}` : ""),
+      message?.trim()
+      || `Upload failed: ${res.status} ${res.statusText}`,
     );
   }
   return (await res.json()) as InventoryUploadResponse;

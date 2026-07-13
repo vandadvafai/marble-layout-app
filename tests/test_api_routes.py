@@ -448,16 +448,11 @@ def _l_shape_piece_dims_for_matching() -> list[dict]:
 
 
 def test_match_inventory_l_shape_pieces_report_correct_status():
-    """Verify the L-shape demo's matcher response against the REAL
-    project inventory.
-
-    The L-shape seed produces 1590 × 2200 mm pieces; the real export
-    at outputs/slab_ingestion/raw_test maxes at 2160 × 1940 mm, so
-    every piece is too tall to fit — even rotated, the longer slab
-    side (2160) is still under the 2200 piece dim. The matcher must
-    therefore return ``no_match`` for every L-shape piece. This is
-    the *expected* outcome the UI surfaces as a clear warning.
-    """
+    """Verify the L-shape demo's matcher response shape against the
+    sample inventory. The specific ``no_match`` counts depend on the
+    slab sizes the inventory ships with (which are project-dependent);
+    what MUST hold on every install is the response shape + that
+    every piece receives a verdict from the four valid statuses."""
     r = client.post(
         "/api/demo-layouts/l_shape/match-inventory",
         json={"pieces": _l_shape_piece_dims_for_matching()},
@@ -467,11 +462,15 @@ def test_match_inventory_l_shape_pieces_report_correct_status():
     assert body["demo_id"] == "l_shape"
     assert body["inventory_count"] > 0
     assert body["summary"]["total_pieces"] == len(body["pieces"])
-    # Every L-shape piece exceeds the real inventory's slab heights.
-    assert body["summary"]["no_match"] == body["summary"]["total_pieces"]
+    valid_statuses = {
+        "exact_fit", "matched", "multiple_options", "no_match",
+    }
     for pe in body["pieces"]:
-        assert pe["status"] == "no_match"
-        assert pe["candidates"] == []
+        assert pe["status"] in valid_statuses
+        if pe["status"] == "no_match":
+            assert pe["candidates"] == []
+        else:
+            assert len(pe["candidates"]) >= 1
 
 
 def test_match_inventory_small_piece_returns_candidates():
@@ -602,20 +601,18 @@ def test_match_inventory_unknown_demo_returns_404():
 
 def test_inventory_info_returns_resolved_source():
     """The info endpoint must report which clean_slabs.json the API
-    is currently using. In the default test environment that's the
-    real project export (preferred over the demo fixture)."""
+    is currently using. Under conftest.py the ``AVANDAD_INVENTORY_PATH``
+    env var pins the sample inventory, so the resolver lands on the
+    ``env_override`` label."""
     r = client.get("/api/inventory/info")
     assert r.status_code == 200, r.text
     body = r.json()
-    # Required keys — shape that the matcher response also embeds.
     for key in (
         "source_label", "source_description", "source_path",
         "valid_count", "skipped_count", "total_records",
     ):
         assert key in body, f"missing field: {key}"
-    # The repo ships both real and demo inventories, so the resolver
-    # MUST land on the real one (resolver preference order).
-    assert body["source_label"] == "real_inventory", body
+    assert body["source_label"] == "env_override", body
     assert body["valid_count"] >= 1
     assert body["valid_count"] + body["skipped_count"] == body["total_records"]
 
@@ -636,7 +633,7 @@ def test_match_inventory_response_embeds_inventory_block():
     body = r.json()
     assert "inventory" in body
     inv = body["inventory"]
-    assert inv["source_label"] == "real_inventory"
+    assert inv["source_label"] == "env_override"
     assert inv["valid_count"] >= 1
     # Legacy top-level mirror — kept so older frontends don't break.
     assert body["inventory_count"] == inv["valid_count"]
@@ -646,11 +643,29 @@ def test_resolve_inventory_source_prefers_env_override(tmp_path, monkeypatch):
     """Setting the env var pins the inventory regardless of which
     project files exist."""
     from placement_engine.api.inventory_source import (
-        ENV_VAR_NAME, SOURCE_ENV, resolve_inventory_source,
+        SOURCE_ENV, resolve_inventory_source,
     )
     fake = tmp_path / "fake_inventory.json"
     fake.write_text('{"records": []}', encoding="utf-8")
-    monkeypatch.setenv(ENV_VAR_NAME, str(fake))
+    monkeypatch.setenv("AVANDAD_INVENTORY_PATH", str(fake))
+    monkeypatch.delenv("STONELAYOUT_INVENTORY_PATH", raising=False)
+    src = resolve_inventory_source(tmp_path)
+    assert src.source_label == SOURCE_ENV
+    assert src.path == fake
+
+
+def test_resolve_inventory_source_legacy_env_var_still_works(
+    tmp_path, monkeypatch,
+):
+    """Operators upgrading from V1.0.0 continue to see the legacy
+    ``STONELAYOUT_INVENTORY_PATH`` env var work as an alias."""
+    from placement_engine.api.inventory_source import (
+        SOURCE_ENV, resolve_inventory_source,
+    )
+    fake = tmp_path / "fake_inventory.json"
+    fake.write_text('{"records": []}', encoding="utf-8")
+    monkeypatch.delenv("AVANDAD_INVENTORY_PATH", raising=False)
+    monkeypatch.setenv("STONELAYOUT_INVENTORY_PATH", str(fake))
     src = resolve_inventory_source(tmp_path)
     assert src.source_label == SOURCE_ENV
     assert src.path == fake
@@ -662,26 +677,32 @@ def test_resolve_inventory_source_env_pointing_to_missing_raises(
     """A broken env override must error loudly — silently falling
     back to a default would surprise the operator."""
     from placement_engine.api.inventory_source import (
-        ENV_VAR_NAME, resolve_inventory_source,
+        resolve_inventory_source,
     )
-    monkeypatch.setenv(ENV_VAR_NAME, str(tmp_path / "does-not-exist.json"))
+    monkeypatch.setenv(
+        "AVANDAD_INVENTORY_PATH", str(tmp_path / "does-not-exist.json"),
+    )
+    monkeypatch.delenv("STONELAYOUT_INVENTORY_PATH", raising=False)
     with pytest.raises(FileNotFoundError):
         resolve_inventory_source(tmp_path)
 
 
-def test_resolve_inventory_source_falls_back_to_demo(tmp_path, monkeypatch):
-    """When neither the env override nor the real export exist, the
-    resolver MUST land on the demo fixture."""
+def test_resolve_inventory_source_reports_empty_on_fresh_install(
+    tmp_path, monkeypatch,
+):
+    """Portability regression: on a fresh clone with no env override
+    and no uploaded session, the resolver MUST return the ``empty``
+    label instead of falling through to a demo fixture that only
+    exists on the original developer's laptop."""
     from placement_engine.api.inventory_source import (
-        ENV_VAR_NAME, SOURCE_DEMO, resolve_inventory_source,
+        SOURCE_EMPTY, resolve_inventory_source,
     )
-    monkeypatch.delenv(ENV_VAR_NAME, raising=False)
-    # Build a project tree where only the demo path exists.
-    demo = tmp_path / "outputs/slab_ingestion_test/clean_slabs.json"
-    demo.parent.mkdir(parents=True)
-    demo.write_text('{"records": []}', encoding="utf-8")
+    monkeypatch.delenv("AVANDAD_INVENTORY_PATH", raising=False)
+    monkeypatch.delenv("STONELAYOUT_INVENTORY_PATH", raising=False)
     src = resolve_inventory_source(tmp_path)
-    assert src.source_label == SOURCE_DEMO
+    assert src.source_label == SOURCE_EMPTY
+    assert src.path is None
+    assert src.is_empty is True
 
 
 # ---------------------------------------------------------------------------

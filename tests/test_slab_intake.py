@@ -647,9 +647,14 @@ def test_ingest_happy_path(tmp_path: Path):
 
 
 def test_slab_id_falls_back_to_item_code_when_no_serial(tmp_path: Path):
+    # V1.1 requires either a serial or explicit dimensions — supply
+    # explicit dimensions so the ``slab_id`` fallback to ``item_code``
+    # is still exercised without the newer column-guard rejecting
+    # the input outright.
     excel = _write_excel(
         tmp_path / "export.xlsx",
-        [{"کد کالا": "P-1", "مساحت (M2)": 2.4}],
+        [{"کد کالا": "P-1", "طول (CM)": 150, "عرض (CM)": 200,
+          "مساحت (M2)": 3.0}],
     )
     images = tmp_path / "images"
     images.mkdir()

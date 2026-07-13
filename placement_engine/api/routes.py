@@ -73,15 +73,13 @@ log = logging.getLogger(__name__)
 # server is launched from. ``__file__`` is …/placement_engine/api/routes.py
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
-# Inventory is now resolved per-request via
-# ``placement_engine.api.inventory_source.resolve_inventory_source``
-# — see that module for the search order (env override → real
-# project export → demo fixture). The legacy ``DEMO_INVENTORY_PATH``
-# constant below is kept ONLY for the demo-layout generator below,
-# which still loads slabs to seed the initial layout. New callers
-# (the matcher and the inventory-info endpoint) MUST go through the
-# resolver so the source label reaches the UI.
-DEMO_INVENTORY_PATH = PROJECT_ROOT / "outputs/slab_ingestion_test/clean_slabs.json"
+# Bundled sample-plan inventory. Ships with the repo so a fresh
+# clone can boot the wizard and demo the sample plans without
+# needing any prior upload or generated file. Used ONLY by the
+# ``GET /api/demo-layouts/{demo_id}`` endpoint below to seed the
+# initial tile size — real-project matching and export go through
+# ``resolve_inventory_source`` and never touch this file.
+SAMPLE_INVENTORY_PATH = PROJECT_ROOT / "examples/demo/clean_slabs.json"
 
 # Demo registry. Keyed by the URL slug the frontend uses. ``label``
 # is the human-readable name the picker shows.
@@ -146,14 +144,19 @@ def get_demo_layout(demo_id: str) -> dict:
             status_code=500,
             detail=f"demo DXF missing on disk: {dxf_path}",
         )
-    if not DEMO_INVENTORY_PATH.exists():
+    if not SAMPLE_INVENTORY_PATH.exists():
         raise HTTPException(
             status_code=500,
-            detail=f"demo inventory missing: {DEMO_INVENTORY_PATH}",
+            detail=(
+                "Sample-plan inventory missing from the repo at "
+                f"{SAMPLE_INVENTORY_PATH.relative_to(PROJECT_ROOT)!s}. "
+                "Real project uploads are unaffected — the sample "
+                "plan generator needs this bundled fixture."
+            ),
         )
 
     geometry = load_target_geometry_from_dxf(dxf_path)
-    inventory = load_inventory(DEMO_INVENTORY_PATH)
+    inventory = load_inventory(SAMPLE_INVENTORY_PATH)
     plan = (
         load_architectural_plan(plan_path) if plan_path.exists()
         # Plans are optional — return an empty placeholder if the
@@ -162,7 +165,7 @@ def get_demo_layout(demo_id: str) -> dict:
     )
     layout = generate_tile_layout_from_inventory(
         geometry, inventory.slabs,
-        source_inventory_path=str(DEMO_INVENTORY_PATH),
+        source_inventory_path=str(SAMPLE_INVENTORY_PATH),
     )
 
     log.info(
@@ -234,14 +237,21 @@ def regenerate_demo_layout(
 
     geometry = load_target_geometry_from_dxf(dxf_path)
 
-    # Pull the ACTIVE inventory (uploaded if present, else demo) for
-    # the "no override" path and to surface in the response — that's
-    # the source the frontend will display next to the canvas.
+    # Pull the ACTIVE inventory (uploaded if present) to seed the
+    # tile size + surface the source in the response. On a fresh
+    # install with no upload, we still allow the sample-plan
+    # regeneration by falling back to the bundled sample inventory
+    # — real-project regeneration hits the "no inventory uploaded"
+    # 400 below when the user picks the inventory-median path.
     try:
         source = resolve_inventory_source(PROJECT_ROOT)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
-    inventory = load_inventory(source.path)
+    inventory = None
+    if source.path is not None:
+        inventory = load_inventory(source.path)
+    elif SAMPLE_INVENTORY_PATH.exists():
+        inventory = load_inventory(SAMPLE_INVENTORY_PATH)
 
     plan = (
         load_architectural_plan(plan_path) if plan_path.exists()
@@ -270,9 +280,25 @@ def regenerate_demo_layout(
             "basis": "explicit_override",
         }
     else:
+        # No explicit tile — must use inventory median. Refuse
+        # cleanly when neither an upload nor the sample fallback
+        # is available so the frontend can surface an actionable
+        # error instead of the layout generator's KeyError.
+        if inventory is None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "No inventory available for inventory-median "
+                    "regeneration. Upload slab data in Step 3, "
+                    "or pass an explicit tile_width_mm + "
+                    "tile_height_mm."
+                ),
+            )
         layout = generate_tile_layout_from_inventory(
             geometry, inventory.slabs,
-            source_inventory_path=str(source.path),
+            source_inventory_path=str(
+                source.path or SAMPLE_INVENTORY_PATH,
+            ),
         )
         chosen = {
             "tile_width_mm": float(layout.tile_width_mm),
@@ -630,7 +656,7 @@ def match_demo_inventory(
     with global waste optimisation.
 
     Inventory source is pinned to the project-wide clean-slabs JSON
-    (see ``DEMO_INVENTORY_PATH``). When the inventory layer becomes
+    (see ``SAMPLE_INVENTORY_PATH``). When the inventory layer becomes
     per-project this resolution will move into the demo registry.
     """
     if demo_id not in DEMOS:
@@ -642,10 +668,39 @@ def match_demo_inventory(
     try:
         source = resolve_inventory_source(PROJECT_ROOT)
     except FileNotFoundError as exc:
-        # No usable inventory file at all — surfaced as a 500 since
-        # this is a server-side configuration problem, not the
-        # frontend's fault.
+        # Operator set an env override to a nonexistent file. That
+        # is a config error, not something the frontend can fix.
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+    if source.is_empty:
+        # No inventory uploaded yet — return an empty candidate
+        # list per piece so the frontend can render "no inventory"
+        # instead of crashing. Same shape as a populated response.
+        return {
+            "demo_id": demo_id,
+            "inventory": _empty_inventory_info_dict(source),
+            "inventory_path": None,
+            "inventory_count": 0,
+            "allow_rotation": body.allow_rotation,
+            "pieces": [
+                {
+                    "piece_id": p.piece_id,
+                    "required_width_mm": p.nominal_width_mm,
+                    "required_height_mm": p.nominal_height_mm,
+                    "required_area_m2": round(
+                        (p.nominal_width_mm * p.nominal_height_mm)
+                        / 1_000_000.0, 4,
+                    ),
+                    "status": "no_match",
+                    "candidates": [],
+                }
+                for p in body.pieces
+            ],
+            "summary": {
+                "exact_fit": 0, "multiple_options": 0,
+                "matched": 0, "no_match": len(body.pieces),
+                "total_pieces": len(body.pieces),
+            },
+        }
     result = load_inventory_slabs(source.path)
     # Resolve top_k. None / unset → matcher default (3). Anything >0
     # is clamped to 200 (matches what any sensible UI could display
@@ -704,22 +759,37 @@ def match_demo_inventory(
 def get_inventory_info() -> dict:
     """Report which inventory the API is currently using.
 
-    Called by the editor on boot so the panel can show "Inventory:
-    real project export · 8 valid / 0 invalid" without having to
-    POST a matcher request first. The endpoint runs the same resolver
-    + loader the matcher uses — so if this says "demo fallback", the
-    matcher will too.
-
-    Returns a 500 when no usable inventory file is on disk; surfaces
-    the configured env override path even when broken so operators
-    can see what was attempted.
+    On a fresh install with no upload yet, returns the ``empty``
+    source with zero counts so the UI can render "no inventory
+    uploaded yet" instead of a 500. Real errors — an env override
+    pointing at a nonexistent file — still surface as 500.
     """
     try:
         source = resolve_inventory_source(PROJECT_ROOT)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+    if source.is_empty:
+        return _empty_inventory_info_dict(source)
     result = load_inventory_slabs(source.path)
     return _inventory_info_dict(source, result)
+
+
+def _empty_inventory_info_dict(source) -> dict:
+    """Response shape when no inventory has been uploaded yet.
+
+    Same top-level keys as the populated response so the frontend
+    only has to check ``valid_count`` (or ``source_label``) to
+    decide whether to prompt the designer to upload.
+    """
+    return {
+        "source_label": source.source_label,
+        "source_description": source_label_description(source.source_label),
+        "source_path": None,
+        "valid_count": 0,
+        "skipped_count": 0,
+        "total_records": 0,
+        "stats": None,
+    }
 
 
 def _inventory_info_dict(source, result) -> dict:
@@ -774,11 +844,12 @@ def _inventory_info_dict(source, result) -> dict:
     }
 
 
-def _relative_to_root(path: Path) -> str:
+def _relative_to_root(path: Path | None) -> str | None:
     """Return ``path`` relative to PROJECT_ROOT when possible, else as
-    its full POSIX form. The relative form is shorter (good for UI)
-    but env-override paths can sit outside the project, in which case
-    we just show the absolute path so the operator can find it."""
+    its full POSIX form. Returns None when ``path`` is None (empty
+    inventory state) so the frontend can render "no inventory"."""
+    if path is None:
+        return None
     try:
         return str(path.relative_to(PROJECT_ROOT))
     except ValueError:
@@ -835,11 +906,27 @@ async def upload_inventory(
             excel_filename=excel.filename,
             images=image_payloads,
         )
+    except ValueError as exc:
+        # Structured pipeline errors (missing required columns,
+        # empty file, sheet unreadable) — surface them verbatim so
+        # the frontend can render the actual reason instead of a
+        # "failed to parse upload" wrapper.
+        log.warning("inventory upload rejected: %s", exc)
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "invalid_excel",
+                "message": str(exc),
+            },
+        ) from exc
     except Exception as exc:
         log.exception("inventory upload failed")
         raise HTTPException(
             status_code=400,
-            detail=f"failed to parse upload: {exc}",
+            detail={
+                "error": "upload_failed",
+                "message": f"Failed to parse upload: {exc}",
+            },
         ) from exc
 
     return {
@@ -940,6 +1027,11 @@ def get_slab_image(slab_id: str, crop: str | None = None):
         source = resolve_inventory_source(PROJECT_ROOT)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+    if source.is_empty:
+        raise HTTPException(
+            status_code=404,
+            detail=f"unknown slab_id {slab_id!r} (no inventory uploaded yet)",
+        )
     result = load_inventory_slabs(source.path)
     slab = next((s for s in result.slabs if s.slab_id == slab_id), None)
     if slab is None:
@@ -1122,6 +1214,14 @@ def export_demo_dxf(demo_id: str, body: ExportDxfRequest):
         source = resolve_inventory_source(PROJECT_ROOT)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+    if source.is_empty:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "No inventory uploaded yet — cannot resolve slab "
+                "metadata for the DXF. Complete Step 3 first."
+            ),
+        )
     result = load_inventory_slabs(source.path)
     slab_by_id = {s.slab_id: s for s in result.slabs}
 
@@ -1232,6 +1332,14 @@ def export_demo_factory_package(
         source = resolve_inventory_source(PROJECT_ROOT)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+    if source.is_empty:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "No inventory uploaded yet — the factory package "
+                "needs slab metadata. Complete Step 3 first."
+            ),
+        )
     result = load_inventory_slabs(source.path)
     slab_by_id = {s.slab_id: s for s in result.slabs}
 
@@ -1340,6 +1448,20 @@ def validate_demo_factory_fit(demo_id: str, body: ValidateFactoryFitRequest):
         source = resolve_inventory_source(PROJECT_ROOT)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+    if source.is_empty:
+        return {
+            "policy": {
+                "blade_kerf_mm": body.manufacturing_policy.blade_kerf_mm,
+                "edge_trim_mm": body.manufacturing_policy.edge_trim_mm,
+                "tolerance_mm": body.manufacturing_policy.tolerance_mm,
+                "profile": body.manufacturing_policy.profile,
+                "exact_edge_action": body.manufacturing_policy.exact_edge_action,
+                "exact_edge_epsilon_mm": body.manufacturing_policy.exact_edge_epsilon_mm,
+            },
+            "results": [],
+            "factory_ready": False,
+            "reason": "no inventory uploaded",
+        }
     result = load_inventory_slabs(source.path)
     slab_by_id = {s.slab_id: s for s in result.slabs}
 

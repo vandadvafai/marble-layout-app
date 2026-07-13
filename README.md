@@ -86,8 +86,96 @@ Open <http://localhost:5173>. The frontend dev server proxies
 ### Optional configuration
 
 See `.env.example` at the repo root. Nothing is required for local
-testing — the app boots against the bundled sample plans and demo
-inventory.
+testing — the app boots against the bundled sample plans and the
+sample inventory that ships in `examples/demo/`.
+
+Two optional env vars change the defaults:
+
+| Variable | Effect |
+| --- | --- |
+| `AVANDAD_DATA_DIR` | Where uploads / processed files / exports land. Default: `<repo>/data/`. |
+| `AVANDAD_INVENTORY_PATH` | Pin the inventory the API reads for real project matching. Setting this bypasses the Step-3 upload flow. Legacy alias `STONELAYOUT_INVENTORY_PATH` still works. |
+| `ODA_FILE_CONVERTER_PATH` | Absolute path to the ODA converter executable. Only needed if you plan to import DWG files (DXF works without it). |
+
+## First Run on a New Computer
+
+Nothing in `outputs/` is required to boot the app — all generated
+files (including `clean_slabs.json`) are produced automatically
+from the user's own uploads at runtime. A clean clone of the repo
+will run without any manual bootstrap:
+
+```bash
+# 1. Clone
+git clone https://github.com/vandadvafai/marble-layout-app.git
+cd marble-layout-app/marble-placement-engine
+
+# 2. Install
+python3 -m pip install -r requirements.txt
+cd frontend && npm install && cd ..
+
+# 3. Start the backend + frontend in two terminals
+python3 scripts/run_api_server.py            # :8000
+(cd frontend && npm run dev)                 # :5173
+
+# 4. Open http://localhost:5173 and walk the 4 steps
+```
+
+On the first visit:
+
+* **Step 1** offers three bundled sample plans (L-shape, apartment,
+  rectangle). Pick any to seed the editor.
+* **Step 2** lets you edit the layout even though no inventory is
+  loaded yet.
+* **Step 3** is the first place the app touches real user data. Pick
+  your Excel file + slab photos and click *Upload & parse*. The
+  processed `clean_slabs.json` and the safe-crop image metadata are
+  generated into a session tempdir under `AVANDAD_DATA_DIR` (or the
+  OS temp directory when that isn't set) — nothing is written back
+  into the repo.
+* **Step 4** unlocks once the Excel has produced at least one valid
+  slab.
+* Exports land in your browser's default download folder.
+
+### Example Excel structure
+
+Avandad recognises both Persian ERP headers and common English
+variants (case-insensitive, extra whitespace tolerated). An English
+Excel that Just Works:
+
+| Serial Number | Width (cm) | Height (cm) | Item Code |
+| --- | --- | --- | --- |
+| VILLA-BEIGE-01 | 160 | 220 | AB-1250 |
+| VILLA-BEIGE-02 | 160 | 245 | AB-1250 |
+
+Column requirements:
+
+* An **identity column**: `Serial`, `Serial Number`, `Slab ID` /
+  the Persian equivalents `سریال کالا` / `کد کالا`.
+* Either **explicit dimension columns** (`Width` + `Height` /
+  `Length`, in cm) **or** a **serial that encodes dimensions** (the
+  Persian ERP convention: first 3 digits = height cm, next 3 =
+  width cm).
+
+Anything else (`Area`, `Slab Number`, `Item Code`, ...) is
+optional. The Step-3 upload response lists which columns were
+recognised (`mapped_columns`) and which were ignored
+(`unmapped_columns`) so it's easy to tell whether the file was
+understood.
+
+### Where uploads and exports are stored
+
+* **Uploads** — each `POST /api/inventory/upload` writes the Excel
+  and the slab photos into an isolated session tempdir. When you
+  click *Remove upload* (or *Start new project*) the tempdir is
+  deleted. The app never uses your Excel/photos after the parse
+  step — the derived `clean_slabs.json` is the only artefact the
+  matcher reads.
+* **Processed files** — a safe-crop pass produces cropped slab
+  images and an `image_metadata.json`. Both live inside the same
+  session tempdir.
+* **Exports** — the client PNG and the factory DXF ZIP are streamed
+  back to the browser and land wherever the browser saves
+  downloads (usually `~/Downloads`).
 
 ## Supported file types
 
@@ -180,8 +268,12 @@ Validation runs in three layers:
 
 | Symptom | Fix |
 | --- | --- |
-| Frontend loads but every request 500s | Backend isn't running or `.env` overrides an invalid path. Confirm `python3 scripts/run_api_server.py` printed `Uvicorn running on…`. |
+| Frontend loads but every request fails with "Backend unavailable" | Backend isn't running or is on a different port than `:8000`. Confirm `python3 scripts/run_api_server.py` printed `Uvicorn running on http://127.0.0.1:8000`. |
+| *"No inventory uploaded yet"* on Step 4 | Expected on a fresh install. Complete Step 3 first — the app never uses a bundled `clean_slabs.json` for real projects. |
+| `clean_slabs.json` not found error | You do NOT need this file to boot the app. It's generated automatically inside a session tempdir when you upload an Excel + photos in Step 3. If you see this in the console, an old caller is still expecting the legacy `outputs/slab_ingestion_test/` path — pull the latest and clear your browser cache. |
 | *Step 4 blocked* banner | Step 3's *Upload & parse* hasn't produced at least one valid slab. Re-check the Excel dimension columns. |
+| Upload fails with *"Excel file is missing required columns"* | The message lists exactly which columns weren't recognised. Add the requested identity / dimension columns and re-upload. Common English aliases (`Serial`, `Width`, `Height`, `Length`) are already accepted. |
+| Photos aren't linking to slab rows | Slab photos are matched by the trailing suffix of the filename (last hyphen-separated segment) against the `Slab Number` / serial suffix. Rename the photos so the suffix matches. |
 | Client image export says a slab failed to load | Re-upload the missing slab photo in Step 3. The error banner names the slab id. |
 | Factory DXF export blocked | Open the *Blockers* pill in the bottom-right action bar; every reason is listed with a suggested fix. |
 | Custom kerf/trim rejects a visually fitting slab | Toggle *Advanced factory settings* off (V1 default) or switch profile to *Exact*. |

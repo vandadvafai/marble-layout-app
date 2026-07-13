@@ -483,7 +483,11 @@ def _rename_columns(
     seen_internal: set[str] = set()
     for col in df.columns:
         header = _normalize_header(col)
-        internal = COLUMN_MAP.get(header)
+        # First try exact match, then a case-insensitive lookup so
+        # "Serial Number" and "serial number" both map to the same
+        # internal name. Persian headers are unaffected — they only
+        # contain characters whose upper/lower forms are identical.
+        internal = COLUMN_MAP.get(header) or COLUMN_MAP.get(header.lower())
         if internal is None:
             unmapped.append(header or str(col))
             renamed_cols.append(str(col))
@@ -740,6 +744,37 @@ def ingest_slab_export(
     suffix_index = _build_suffix_index(image_index)
     df, resolved_sheet = _load_excel(excel_path, sheet_name)
     df, mapped, unmapped = _rename_columns(df)
+
+    # Portability guard: the Excel must at minimum expose SOME
+    # identity column (serial, item code) so slabs can be named,
+    # AND either explicit dimension columns OR a serial column the
+    # parser can decode dimensions from. Fail loudly with the
+    # actionable list of missing columns instead of quietly
+    # returning zero valid slabs.
+    columns = set(df.columns)
+    identity_options = {"serial_number", "item_code"}
+    dimension_pair = {"height_cm_excel", "width_cm_excel"}
+    missing_required: list[str] = []
+    if not (columns & identity_options):
+        missing_required.append(
+            "an identity column (e.g. 'Serial', 'Item Code', "
+            "'سریال کالا', 'کد کالا')"
+        )
+    has_explicit_dims = dimension_pair.issubset(columns)
+    has_serial = "serial_number" in columns
+    if not (has_explicit_dims or has_serial):
+        missing_required.append(
+            "a dimension column pair (e.g. 'Width' + 'Height', "
+            "'عرض' + 'طول') OR a 'Serial'/'سریال' column the "
+            "parser can decode dimensions from"
+        )
+    if missing_required:
+        seen = ", ".join(sorted(mapped.keys())) or "(no known columns)"
+        raise ValueError(
+            "Excel file is missing required columns: "
+            + "; ".join(missing_required)
+            + f". Recognised columns in this file: {seen}."
+        )
 
     records: list[SlabRecord] = []
     for i, row in df.iterrows():

@@ -1,28 +1,36 @@
-"""Resolve which `clean_slabs.json` the API should use as its inventory.
+"""Resolve which slab inventory the API should use.
 
-The editor used to read a single hard-coded demo fixture
-(``outputs/slab_ingestion_test/clean_slabs.json``). That fixture has
-~7 records and was useful for plumbing the UI, but it's not the real
-project inventory. This module replaces the single hard path with an
-ordered search:
+Portability rewrite
+-------------------
+The previous version silently fell back to a demo ``clean_slabs.json``
+at ``outputs/slab_ingestion_test/`` when the operator hadn't uploaded
+anything yet. On a fresh clone that file doesn't exist, so:
 
-  1. ``STONELAYOUT_INVENTORY_PATH`` env var. Lets ops/dev point the
-     server at any clean_slabs.json without code changes — the most
-     direct way to test against a different inventory file.
-  2. The real project export at
-     ``outputs/slab_ingestion/raw_test/clean_slabs.json``. Produced by
-     the slab-intake pipeline against ``data/raw_test/export.xlsx``;
-     this is the file the engine is meant to use day-to-day.
-  3. The demo fixture at
-     ``outputs/slab_ingestion_test/clean_slabs.json``. Last resort —
-     kept around so a developer who hasn't run the intake pipeline
-     locally can still boot the UI.
+    * either the resolver raised ``FileNotFoundError`` and every
+      inventory endpoint returned 500, OR
+    * the operator's *real* project silently ran against the demo
+      fixture — which is the surprise the portability audit
+      flagged.
 
-Each candidate is checked for existence (and non-empty content) before
-being accepted. The resolved choice carries a ``source_label`` that
-the UI surfaces so designers know exactly which inventory they're
-matching against — that traceability matters when a slab they expect
-to see doesn't appear in the candidate list.
+The new resolver never falls back to a filesystem path outside the
+operator's explicit choice. Order of preference:
+
+    1. The active uploaded session (Step-3 upload). Highest
+       precedence.
+    2. ``$AVANDAD_INVENTORY_PATH`` (or the legacy
+       ``STONELAYOUT_INVENTORY_PATH``) — an explicit
+       operator-configured path. A missing file at this location
+       raises, because "override to a nonexistent file" is a
+       configuration error we must not swallow.
+    3. Empty. The resolver returns a ``ResolvedInventorySource``
+       with ``path=None`` and ``source_label="empty"``. Callers
+       render an empty inventory (no slabs, no crash) so the
+       designer can proceed straight to Step 3 and upload one.
+
+Sample-plan endpoints ship with their own bundled inventory fixture
+(see ``placement_engine/api/routes.py``) so a fresh clone can still
+demonstrate the wizard without any upload. That fixture is NEVER
+used for real-project matching or export.
 """
 
 from __future__ import annotations
@@ -37,60 +45,51 @@ from pathlib import Path
 # ``InventorySource`` discriminated union on the TypeScript side.
 SOURCE_UPLOADED = "uploaded"
 SOURCE_ENV = "env_override"
-SOURCE_REAL = "real_inventory"
-SOURCE_DEMO = "demo_fallback"
+SOURCE_EMPTY = "empty"
 
-ENV_VAR_NAME = "STONELAYOUT_INVENTORY_PATH"
+# Legacy env var name kept as an alias so operators upgrading from
+# V1.0.0 don't get bitten by a rename. The Avandad name wins if both
+# are set.
+ENV_VAR_NAMES: tuple[str, ...] = (
+    "AVANDAD_INVENTORY_PATH",
+    "STONELAYOUT_INVENTORY_PATH",
+)
 
 
 @dataclass(frozen=True)
 class ResolvedInventorySource:
-    """The picked clean_slabs.json plus the trail of paths that were
-    considered. Frozen so callers can cache without aliasing concerns.
+    """The picked slab inventory + the trail of candidates checked.
 
-    ``candidates_checked`` is in priority order — first entry was tried
-    first. ``source_label`` matches one of the SOURCE_* constants
-    above. The label is the UI-visible identifier; the path is for
-    logging and the inventory-info endpoint.
+    ``path`` is ``None`` when the resolver returned an empty result
+    (no upload active, no env override). ``candidates_checked``
+    lists every path we looked at, in priority order, so the info
+    endpoint can surface it to operators.
     """
 
-    path: Path
+    path: Path | None
     source_label: str
     candidates_checked: list[Path]
+
+    @property
+    def is_empty(self) -> bool:
+        """True when there is no inventory to load."""
+        return self.path is None
 
 
 def resolve_inventory_source(project_root: Path) -> ResolvedInventorySource:
     """Pick the inventory file the API should load.
 
-    Order of preference (highest first):
-
-    0. The active uploaded session — when a designer ran the Step-3
-       upload flow, their parsed ``clean_slabs.json`` lives in a
-       tempdir that the resolver MUST pick up first. Otherwise the
-       upload would silently be ignored, which is the exact bug the
-       upload milestone fixes. Falls through cleanly when no upload
-       is active.
-    1. ``$STONELAYOUT_INVENTORY_PATH`` — when set AND the file exists.
-       A missing env-pointed file is treated as a configuration error
-       — we raise here rather than silently falling through, because
-       silently using a different file would surprise an operator who
-       expected the override to take effect.
-    2. ``<project_root>/outputs/slab_ingestion/raw_test/clean_slabs.json``
-       — the real project export. Skipped (without error) when absent
-       so a dev who hasn't run the intake pipeline still gets a
-       working server.
-    3. ``<project_root>/outputs/slab_ingestion_test/clean_slabs.json``
-       — the demo fallback. Skipped when missing; in that case we
-       raise so the caller knows there's nothing usable.
-
-    Raises ``FileNotFoundError`` only when EVERY candidate is unusable.
+    See the module docstring for the full precedence rules. Never
+    raises for a "no inventory yet" state — callers handle
+    ``is_empty`` explicitly. Only raises when the operator set an
+    env override to a file that doesn't exist (a configuration
+    error we must not swallow).
     """
     candidates: list[Path] = []
 
-    # Step 0: uploaded session takes precedence over everything else.
-    # Imported lazily so the resolver doesn't pull in the upload
-    # module (and its slab-intake dependency chain) when nothing has
-    # been uploaded yet.
+    # Step 1: uploaded session takes precedence over everything else.
+    # Lazy import so the resolver doesn't drag in the upload module's
+    # slab-intake dependency chain when nothing has been uploaded yet.
     from placement_engine.api.inventory_upload import get_active_upload
     active = get_active_upload()
     if active is not None and active.clean_slabs_path.exists():
@@ -100,20 +99,29 @@ def resolve_inventory_source(project_root: Path) -> ResolvedInventorySource:
             source_label=SOURCE_UPLOADED,
             candidates_checked=candidates,
         )
-    env_raw = os.environ.get(ENV_VAR_NAME)
+
+    # Step 2: environment override.
+    env_raw: str | None = None
+    env_var_used: str | None = None
+    for name in ENV_VAR_NAMES:
+        val = os.environ.get(name)
+        if val:
+            env_raw = val
+            env_var_used = name
+            break
     if env_raw:
         env_path = Path(env_raw).expanduser()
-        # Resolve relative env-paths against the project root so
-        # ``STONELAYOUT_INVENTORY_PATH=outputs/foo.json`` works the
-        # same way no matter where the server is launched from.
+        # Relative paths resolve against the project root so a value
+        # like ``examples/demo/clean_slabs.json`` works no matter
+        # where the server was launched from.
         if not env_path.is_absolute():
             env_path = (project_root / env_path).resolve()
         candidates.append(env_path)
         if not env_path.exists():
             raise FileNotFoundError(
-                f"{ENV_VAR_NAME}={env_raw!r} points at {env_path}, "
-                f"which does not exist. Either fix the path or unset "
-                f"the variable to fall back to the project defaults.",
+                f"{env_var_used}={env_raw!r} points at {env_path}, "
+                f"which does not exist. Fix the path or unset the "
+                f"variable to use the upload flow instead.",
             )
         return ResolvedInventorySource(
             path=env_path,
@@ -121,27 +129,13 @@ def resolve_inventory_source(project_root: Path) -> ResolvedInventorySource:
             candidates_checked=candidates,
         )
 
-    real = project_root / "outputs/slab_ingestion/raw_test/clean_slabs.json"
-    candidates.append(real)
-    if real.exists():
-        return ResolvedInventorySource(
-            path=real, source_label=SOURCE_REAL,
-            candidates_checked=candidates,
-        )
-
-    demo = project_root / "outputs/slab_ingestion_test/clean_slabs.json"
-    candidates.append(demo)
-    if demo.exists():
-        return ResolvedInventorySource(
-            path=demo, source_label=SOURCE_DEMO,
-            candidates_checked=candidates,
-        )
-
-    raise FileNotFoundError(
-        "no inventory file found. Tried: "
-        + ", ".join(str(c) for c in candidates)
-        + f". Set {ENV_VAR_NAME} to point at a clean_slabs.json, or "
-        "run the slab-intake pipeline to produce one.",
+    # Step 3: empty state. No upload, no override — the app renders
+    # a "no inventory yet" surface and gates Step 4 until the user
+    # runs the Step-3 upload flow.
+    return ResolvedInventorySource(
+        path=None,
+        source_label=SOURCE_EMPTY,
+        candidates_checked=candidates,
     )
 
 
@@ -152,7 +146,9 @@ def source_label_description(label: str) -> str:
     and the API agree on what each label means."""
     return {
         SOURCE_UPLOADED: "uploaded by designer (Step 3)",
-        SOURCE_ENV: f"resolved from ${ENV_VAR_NAME}",
-        SOURCE_REAL: "real project inventory (outputs/slab_ingestion/raw_test)",
-        SOURCE_DEMO: "demo fallback (outputs/slab_ingestion_test)",
+        SOURCE_ENV: (
+            "resolved from $AVANDAD_INVENTORY_PATH "
+            "(or the legacy $STONELAYOUT_INVENTORY_PATH)"
+        ),
+        SOURCE_EMPTY: "no inventory uploaded yet",
     }.get(label, label)

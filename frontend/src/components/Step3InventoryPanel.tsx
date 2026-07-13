@@ -360,7 +360,9 @@ export default function Step3InventoryPanel({
               </div>
               <div className="step3-dev-row">
                 <span className="step3-dev-label">File path</span>
-                <code className="step3-dev-path">{info.source_path}</code>
+                <code className="step3-dev-path">
+                  {info.source_path ?? "(none — no inventory uploaded)"}
+                </code>
               </div>
               {summary && (
                 <div className="step3-dev-row">
@@ -464,8 +466,7 @@ function sourceClassFor(label: string): string {
   return {
     uploaded: "inventory-source-uploaded",
     env_override: "inventory-source-env",
-    real_inventory: "inventory-source-real",
-    demo_fallback: "inventory-source-demo",
+    empty: "inventory-source-empty",
   }[label] ?? "inventory-source-other";
 }
 
@@ -473,8 +474,7 @@ function labelToChip(label: string): string {
   return {
     uploaded: "uploaded",
     env_override: "env override",
-    real_inventory: "real",
-    demo_fallback: "demo fallback",
+    empty: "not uploaded yet",
   }[label] ?? label;
 }
 

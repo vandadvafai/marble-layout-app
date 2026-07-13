@@ -37,12 +37,28 @@ from __future__ import annotations
 # Persian (ERP header, exactly as exported) → internal name used by the
 # pipeline. Add new aliases by repeating the value with another key.
 COLUMN_MAP: dict[str, str] = {
-    # --- identity -----------------------------------------------------
+    # --- identity (Persian) -------------------------------------------
     "کد کالا": "item_code",
     "سریال کالا": "serial_number",
     "سریال": "serial_number",
     "شماره": "slab_number",
-    # --- geometry / area ---------------------------------------------
+    # --- identity (English aliases so uploads from non-Persian ERPs
+    #   don't fail with "no recognised columns"). Matched after
+    #   whitespace normalisation, case-insensitive at the loader.
+    "item code": "item_code",
+    "item_code": "item_code",
+    "code": "item_code",
+    "serial number": "serial_number",
+    "serial_number": "serial_number",
+    "serial": "serial_number",
+    "slab id": "serial_number",
+    "slab_id": "serial_number",
+    "id": "serial_number",
+    "slab number": "slab_number",
+    "slab_number": "slab_number",
+    "photo id": "slab_number",
+    "number": "slab_number",
+    # --- geometry / area (Persian) -----------------------------------
     "طول (CM)": "height_cm_excel",
     "طول": "height_cm_excel",
     "عرض (CM)": "width_cm_excel",
@@ -50,6 +66,20 @@ COLUMN_MAP: dict[str, str] = {
     "مساحت (M2)": "area_m2",
     "مساحت M2": "area_m2",
     "مساحت": "area_m2",
+    # --- geometry / area (English aliases) ---------------------------
+    "height": "height_cm_excel",
+    "height (cm)": "height_cm_excel",
+    "height_cm": "height_cm_excel",
+    "length": "height_cm_excel",
+    "length (cm)": "height_cm_excel",
+    "length_cm": "height_cm_excel",
+    "width": "width_cm_excel",
+    "width (cm)": "width_cm_excel",
+    "width_cm": "width_cm_excel",
+    "area": "area_m2",
+    "area (m2)": "area_m2",
+    "area_m2": "area_m2",
+    "area m2": "area_m2",
 }
 
 # Internal columns the pipeline actively needs. A missing column does not

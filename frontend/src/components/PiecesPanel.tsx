@@ -789,9 +789,9 @@ function InventoryHeader({
     );
   }
   const sourceClass = {
+    uploaded: "inventory-source-uploaded",
     env_override: "inventory-source-env",
-    real_inventory: "inventory-source-real",
-    demo_fallback: "inventory-source-demo",
+    empty: "inventory-source-empty",
   }[info.source_label] ?? "inventory-source-other";
   return (
     <div className="inventory-header">
@@ -826,8 +826,8 @@ function InventoryHeader({
  *  its raw string so any future server-side label still renders.*/
 function labelToChip(source_label: string): string {
   return {
+    uploaded: "uploaded",
     env_override: "env override",
-    real_inventory: "real",
-    demo_fallback: "demo fallback",
+    empty: "not uploaded yet",
   }[source_label] ?? source_label;
 }

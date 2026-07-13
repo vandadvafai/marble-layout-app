@@ -343,17 +343,21 @@ export interface InventoryStats {
  *  inside the matcher response so a single round-trip is enough to
  *  populate the panel header + the per-piece candidates. */
 export interface InventoryInfo {
-  /** "env_override" | "real_inventory" | "demo_fallback" — see
+  /** ``"empty"`` | ``"uploaded"`` | ``"env_override"`` — see
    *  ``placement_engine/api/inventory_source.py`` for the source of
    *  truth. Kept as a string (not a strict union) so a future label
-   *  doesn't require a frontend bump. */
+   *  doesn't require a frontend bump. On a fresh install the value
+   *  is ``"empty"`` until the designer completes Step 3. */
   source_label: string;
-  /** Human-readable explanation of the label, e.g. "real project
-   *  inventory (outputs/slab_ingestion/raw_test)". Shown as the chip
-   *  tooltip + the panel subtitle. */
+  /** Human-readable explanation of the label, e.g. "uploaded by
+   *  designer (Step 3)". Shown as the chip tooltip + the panel
+   *  subtitle. */
   source_description: string;
-  /** Project-relative path to the resolved clean_slabs.json. */
-  source_path: string;
+  /** Project-relative path to the resolved ``clean_slabs.json``.
+   *  ``null`` when no inventory has been uploaded — the app never
+   *  surfaces raw filesystem paths outside Step 3's Developer
+   *  Details block. */
+  source_path: string | null;
   valid_count: number;
   skipped_count: number;
   total_records: number;
