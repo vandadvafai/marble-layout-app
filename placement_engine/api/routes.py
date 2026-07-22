@@ -32,9 +32,6 @@ from placement_engine.api.inventory_source import (
     resolve_inventory_source,
     source_label_description,
 )
-from placement_engine.api.dxf_export import (
-    DxfPieceInput, build_dxf_bytes,
-)
 from placement_engine.api.factory_layout import (
     AssignmentInput,
     MarginPolicy,
@@ -971,15 +968,179 @@ def delete_current_inventory() -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Slab calibration — V1.2 Standardization
+# ---------------------------------------------------------------------------
+
+
+@router.get("/api/calibration/records")
+def get_calibration_records() -> dict:
+    """Return every calibration record in the active session plus a
+    quick per-status count map. Used by the Step-3 calibration view."""
+    from placement_engine.api.inventory_upload import (
+        calibration_records_dict,
+    )
+    from placement_engine.calibration import count_by_status
+    session = get_active_upload()
+    if session is None:
+        return {"active": False, "records": [], "counts": {
+            "approved": 0, "needs_review": 0,
+            "missing_photo": 0, "rejected": 0,
+        }}
+    return {
+        "active": True,
+        "session_id": session.session_id,
+        "factory_policy_version": "1.0",
+        "records": calibration_records_dict(session),
+        "counts": count_by_status(session.calibration_records),
+    }
+
+
+@router.get("/api/calibration/{slab_id}/original-image")
+def get_calibration_original_image(slab_id: str):
+    """Serve the raw uploaded photo for a slab. The manual-review
+    modal draws its corner handles on top of this image."""
+    from placement_engine.api.inventory_upload import get_active_upload
+    session = get_active_upload()
+    if session is None:
+        raise HTTPException(status_code=404, detail="no active upload")
+    rec = next(
+        (r for r in session.calibration_records if r.slab_id == slab_id),
+        None,
+    )
+    if rec is None:
+        raise HTTPException(
+            status_code=404, detail=f"unknown slab_id {slab_id!r}",
+        )
+    if not rec.original_image_path:
+        raise HTTPException(
+            status_code=404, detail=f"slab {slab_id!r} has no original photo",
+        )
+    img = Path(rec.original_image_path)
+    if not img.exists():
+        raise HTTPException(
+            status_code=404, detail="original image missing on disk",
+        )
+    return FileResponse(img)
+
+
+@router.get("/api/calibration/{slab_id}/calibrated-image")
+def get_calibration_calibrated_image(slab_id: str):
+    """Serve the perspective-corrected + edge-deducted image. This
+    is what Layout Helper's canvas and the client PNG show."""
+    from placement_engine.api.inventory_upload import get_active_upload
+    session = get_active_upload()
+    if session is None:
+        raise HTTPException(status_code=404, detail="no active upload")
+    rec = next(
+        (r for r in session.calibration_records if r.slab_id == slab_id),
+        None,
+    )
+    if rec is None or not rec.calibrated_image_path:
+        raise HTTPException(
+            status_code=404,
+            detail=f"no calibrated image for slab {slab_id!r}",
+        )
+    img = Path(rec.calibrated_image_path)
+    if not img.exists():
+        raise HTTPException(
+            status_code=404, detail="calibrated image missing on disk",
+        )
+    return FileResponse(img)
+
+
+class ManualCornersBody(BaseModel):
+    """Operator-confirmed corners from the manual-review modal.
+
+    ``corners`` is a 4-length list of ``[x, y]`` pixel points in
+    the SAME order as ``SlabCorners``: top-left, top-right,
+    bottom-right, bottom-left. The frontend enforces this by
+    naming its handles rather than relying on drag order.
+    """
+    corners: list[list[float]] = Field(default_factory=list)
+
+
+@router.post("/api/calibration/{slab_id}/manual-corners")
+def post_manual_corners(slab_id: str, body: ManualCornersBody) -> dict:
+    """Re-rectify the slab with operator-supplied corners and mark
+    the record approved."""
+    from placement_engine.api.inventory_upload import update_manual_corners
+    from placement_engine.calibration import SlabCorners
+    try:
+        corners = SlabCorners.from_iterable(body.corners)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    try:
+        updated = update_manual_corners(slab_id, corners)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"record": updated.to_dict()}
+
+
+class CalibrationStatusBody(BaseModel):
+    status: str
+
+
+@router.post("/api/calibration/{slab_id}/status")
+def post_calibration_status(
+    slab_id: str, body: CalibrationStatusBody,
+) -> dict:
+    """Flip a calibration record between approved / rejected /
+    needs_review. Missing_photo is set by the pipeline, not the UI."""
+    from placement_engine.api.inventory_upload import set_calibration_status
+    from placement_engine.calibration import CalibrationStatus
+    try:
+        status = CalibrationStatus(body.status)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unknown status {body.status!r}",
+        ) from exc
+    if status == CalibrationStatus.MISSING_PHOTO:
+        raise HTTPException(
+            status_code=400,
+            detail="missing_photo is set by the pipeline, not the UI",
+        )
+    try:
+        updated = set_calibration_status(slab_id, status)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"record": updated.to_dict()}
+
+
+@router.post("/api/calibration/{slab_id}/replace-image")
+async def post_replace_image(
+    slab_id: str, image: UploadFile = File(...),
+) -> dict:
+    """Swap a slab's source photo and re-run calibration on it.
+
+    Used by the manual-review modal's "Replace image" action so an
+    operator can fix a bad photo without discarding the whole
+    project. The new photo goes through the same classifier every
+    other slab does — see ``replace_slab_image``."""
+    from placement_engine.api.inventory_upload import replace_slab_image
+    if not image.filename:
+        raise HTTPException(status_code=400, detail="missing image file")
+    data = await image.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="image file is empty")
+    try:
+        updated = replace_slab_image(slab_id, image.filename, data)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"record": updated.to_dict()}
+
+
+# ---------------------------------------------------------------------------
 # GET /api/inventory/slab-image/{slab_id}
 # ---------------------------------------------------------------------------
 
 
 @router.get("/api/inventory/slab-crop-info/{slab_id}")
 def get_slab_crop_info(slab_id: str) -> dict:
-    """Tell the frontend whether the green-box safe crop is available
-    for this slab — used by the Step-4 properties card to flip the
-    "Safe crop not detected — using full image" warning on or off.
+    """Tell the frontend whether an APPROVED calibrated image is
+    available for this slab. Replaces the old green-box-only check —
+    under V1.2 the calibrated image comes from the calibration
+    pipeline regardless of source type.
 
     Returns ``{available: false}`` when no upload session is active
     OR when this slab's record isn't in the metadata map OR when its
@@ -988,22 +1149,23 @@ def get_slab_crop_info(slab_id: str) -> dict:
     active = get_active_upload()
     if active is None:
         return {"available": False, "reason": "no_active_upload"}
-    meta = active.image_metadata_by_slab.get(slab_id)
-    if meta is None:
-        return {"available": False, "reason": "no_metadata"}
-    if not meta.green_box_detected:
+    rec = next(
+        (r for r in active.calibration_records if r.slab_id == slab_id),
+        None,
+    )
+    if rec is None:
+        return {"available": False, "reason": "no_calibration_record"}
+    if rec.calibration_status.value != "approved":
         return {
             "available": False,
-            "reason": "green_box_not_detected",
-            "warnings": list(meta.warnings),
+            "reason": rec.calibration_status.value,
+            "warnings": list(rec.warnings),
         }
     return {
         "available": True,
-        "crop_x": meta.crop_x,
-        "crop_y": meta.crop_y,
-        "crop_width": meta.crop_width,
-        "crop_height": meta.crop_height,
-        "confidence_score": meta.confidence_score,
+        "source_type": rec.source_type.value,
+        "confidence_score": rec.calibration_confidence,
+        "factory_policy_version": rec.factory_policy_version,
     }
 
 
@@ -1052,24 +1214,28 @@ def get_slab_image(slab_id: str, crop: str | None = None):
         )
 
     if crop == "safe-area":
+        # V1.2 — serve the CALIBRATED image (already usable-area
+        # cropped) when an approved calibration exists. Falls back
+        # to the original photo with an ``X-Slab-Image-Crop:
+        # fallback`` header if the operator hasn't approved this
+        # slab yet — the UI decides whether to surface the warning.
         active = get_active_upload()
         if active is not None:
-            meta = active.image_metadata_by_slab.get(slab_id)
+            rec = next(
+                (r for r in active.calibration_records if r.slab_id == slab_id),
+                None,
+            )
             if (
-                meta is not None
-                and meta.green_box_detected
-                and meta.processed_image_path
+                rec is not None
+                and rec.calibrated_image_path
+                and rec.calibration_status.value == "approved"
             ):
-                processed = Path(meta.processed_image_path)
-                if processed.exists():
+                calibrated = Path(rec.calibrated_image_path)
+                if calibrated.exists():
                     return FileResponse(
-                        processed,
+                        calibrated,
                         headers={"X-Slab-Image-Crop": "safe-area"},
                     )
-        # Safe-crop requested but unavailable — fall back to the
-        # original and flag it in a response header. The image
-        # endpoint never 404s on this path because returning a
-        # usable picture is better than a hard failure here.
         return FileResponse(
             img_path,
             headers={"X-Slab-Image-Crop": "fallback"},
@@ -1109,11 +1275,14 @@ class ManufacturingPolicyBody(BaseModel):
     scored (``allow`` / ``warn`` / ``block``).
     """
     blade_kerf_mm: float = Field(default=3.0, ge=0.0)
-    edge_trim_mm: float = Field(default=5.0, ge=0.0)
+    edge_trim_mm: float = Field(default=0.0, ge=0.0)
     tolerance_mm: float = Field(default=2.0, ge=0.0)
-    # V1 defaults treat the imported slab as the usable area (see
-    # ``MarginPolicy`` for the reasoning). A frontend that opts in
-    # to Advanced Factory Settings will override these.
+    # V1 defaults treat the imported slab as the usable area — the
+    # confirmed factory policy already deducts 20 mm/side ONCE inside
+    # calibration, so ``edge_trim_mm`` defaults to 0 here to avoid
+    # deducting it again (see ``MarginPolicy`` for the reasoning). A
+    # frontend that opts in to Advanced Factory Settings will
+    # override these.
     profile: str = Field(default="exact")
     exact_edge_action: str = Field(default="allow")
     exact_edge_epsilon_mm: float = Field(default=0.5, ge=0.0)
@@ -1523,6 +1692,14 @@ def _build_factory_assignments(
         slab_w = float(slab.width_mm) if slab else 0.0
         slab_h = float(slab.height_mm) if slab else 0.0
         slab_serial = getattr(slab, "serial_number", None) if slab else None
+        excel_w = (
+            float(slab.excel_width_mm)
+            if slab is not None and slab.excel_width_mm else slab_w
+        )
+        excel_h = (
+            float(slab.excel_height_mm)
+            if slab is not None and slab.excel_height_mm else slab_h
+        )
 
         rotation_needed = False
         waste_fraction: float | None = None
@@ -1551,6 +1728,8 @@ def _build_factory_assignments(
             rotation_needed=rotation_needed,
             waste_fraction=waste_fraction,
             slab_serial=slab_serial,
+            excel_width_mm=excel_w,
+            excel_height_mm=excel_h,
         ))
     return out
 

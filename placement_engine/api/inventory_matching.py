@@ -79,6 +79,11 @@ class InventorySlab:
     material_name: str | None = None
     finish: str | None = None
     ingestion_warnings: tuple[str, ...] = ()
+    # Physical (Excel-authoritative) dims for DXF label traceability —
+    # see ``placement_engine.inventory.model.InventorySlab``. width_mm/
+    # height_mm above stay the USABLE size the matcher plans against.
+    excel_width_mm: float | None = None
+    excel_height_mm: float | None = None
 
 
 @dataclass(frozen=True)
@@ -133,6 +138,8 @@ def _from_typed(typed: _TypedInventorySlab) -> InventorySlab:
         material_name=None,
         finish=None,
         ingestion_warnings=tuple(typed.ingestion_warnings),
+        excel_width_mm=typed.excel_width_mm,
+        excel_height_mm=typed.excel_height_mm,
     )
 
 

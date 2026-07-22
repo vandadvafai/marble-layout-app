@@ -19,6 +19,23 @@ from placement_engine.api.routes import DEMOS
 client = TestClient(app)
 
 
+@pytest.fixture(autouse=True)
+def _reset_upload_state():
+    """Guarantee a clean upload session around every test in this file.
+
+    Individual tests call ``_ensure_no_upload()`` themselves at the
+    start/end of their bodies, but that's fragile: an assertion
+    failure or ``pytest.skip()`` partway through a test skips any
+    trailing cleanup call, leaking the uploaded project (and its
+    on-disk directory) into every test that runs after it. This
+    fixture makes cleanup unconditional regardless of how a test
+    exits.
+    """
+    _ensure_no_upload()
+    yield
+    _ensure_no_upload()
+
+
 def test_health_returns_engine_version():
     r = client.get("/api/health")
     assert r.status_code == 200
@@ -726,9 +743,21 @@ def _read_test_images() -> list[tuple[str, bytes]]:
 
 def _ensure_no_upload():
     """Each test runs with a clean upload session — otherwise the
-    resolver picks up state from a prior test."""
-    from placement_engine.api.inventory_upload import clear_active_upload
-    clear_active_upload()
+    resolver picks up state from a prior test.
+
+    Under V1.2 the upload is persistent (a project directory under
+    AVANDAD_DATA_DIR). We also purge that directory so a leftover
+    from a prior test doesn't rehydrate on the next
+    ``get_active_upload()`` call.
+    """
+    import shutil
+    import placement_engine.api.inventory_upload as _iu
+    from placement_engine.api.app_paths import resolve_app_paths
+    _iu.clear_active_upload()
+    _iu._ACTIVE_UPLOAD = None
+    projects_dir = resolve_app_paths().root / "projects"
+    if projects_dir.exists():
+        shutil.rmtree(projects_dir, ignore_errors=True)
 
 
 def test_upload_returns_summary_and_activates_session():
@@ -872,6 +901,191 @@ def test_slab_image_endpoint_uses_uploaded_inventory():
     assert img.status_code == 200, img.text
     assert img.headers["content-type"].startswith("image/")
     assert len(img.content) > 0
+    _ensure_no_upload()
+
+
+def _green_boundary_jpeg_bytes(size: int = 512, margin: int = 40) -> bytes:
+    """In-memory synthetic photo with a bright-green boundary — the
+    same shape ``tests/test_calibration.py``'s
+    ``_synthetic_slab_with_green_boundary`` writes to disk, encoded
+    straight to JPEG bytes for a multipart upload."""
+    import cv2
+    import numpy as np
+    img = np.zeros((size, size, 3), dtype=np.uint8)
+    img[:, :] = (60, 60, 60)
+    cv2.rectangle(
+        img, (margin, margin), (size - margin, size - margin),
+        (0, 255, 0), thickness=4,
+    )
+    cv2.rectangle(
+        img, (margin + 4, margin + 4),
+        (size - margin - 4, size - margin - 4),
+        (200, 180, 150), thickness=-1,
+    )
+    ok, buf = cv2.imencode(".jpg", img)
+    assert ok
+    return buf.tobytes()
+
+
+def test_replace_image_recalibrates_slab():
+    """A slab uploaded with no photo (missing_photo) must recover
+    once the operator replaces it with a real photo through the
+    manual-review modal's "Replace image" action — and the new
+    photo must go through the SAME classifier every other slab does
+    (auto-approves here because it's a clean green-boundary shot)."""
+    import io
+    from openpyxl import Workbook
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["Serial", "Width (cm)", "Height (cm)"])
+    ws.append(["REPLACE-1", 160, 160])
+    buf = io.BytesIO()
+    wb.save(buf)
+    r = client.post(
+        "/api/inventory/upload",
+        files={"excel": ("replace.xlsx", buf.getvalue(),
+                         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+    )
+    assert r.status_code == 200, r.text
+    before = client.get("/api/calibration/records").json()
+    before_rec = next(x for x in before["records"] if x["slab_id"] == "REPLACE-1")
+    assert before_rec["calibration_status"] == "missing_photo"
+
+    photo = _green_boundary_jpeg_bytes()
+    replace = client.post(
+        "/api/calibration/REPLACE-1/replace-image",
+        files={"image": ("new_photo.jpg", photo, "image/jpeg")},
+    )
+    assert replace.status_code == 200, replace.text
+    record = replace.json()["record"]
+    assert record["source_type"] == "green_boundary"
+    assert record["calibration_status"] == "approved"
+    assert record["original_image_path"] is not None
+    assert record["calibrated_image_path"] is not None
+
+    after = client.get("/api/calibration/records").json()
+    after_rec = next(x for x in after["records"] if x["slab_id"] == "REPLACE-1")
+    assert after_rec["calibration_status"] == "approved"
+    assert after["counts"]["approved"] == 1
+    assert after["counts"]["missing_photo"] == 0
+    _ensure_no_upload()
+
+
+def test_replace_image_unknown_slab_404s():
+    import io
+    from openpyxl import Workbook
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["Serial", "Width (cm)", "Height (cm)"])
+    ws.append(["ANY-1", 160, 160])
+    buf = io.BytesIO()
+    wb.save(buf)
+    r = client.post(
+        "/api/inventory/upload",
+        files={"excel": ("any.xlsx", buf.getvalue(),
+                         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+    )
+    assert r.status_code == 200
+    photo = _green_boundary_jpeg_bytes()
+    replace = client.post(
+        "/api/calibration/DOES-NOT-EXIST/replace-image",
+        files={"image": ("new_photo.jpg", photo, "image/jpeg")},
+    )
+    assert replace.status_code == 404
+    _ensure_no_upload()
+
+
+def test_legacy_green_box_project_migrates_through_real_route(tmp_path, monkeypatch):
+    """M4.5 — integration proof (not just the unit-tested pure
+    function in ``test_calibration.py``) that a project directory
+    shaped like a pre-calibration install gets promoted through the
+    ACTUAL ``GET /api/calibration/records`` route the frontend calls,
+    the first time it's read after a restart.
+
+    Seeds ``calibrations.json`` by hand the way an old install would
+    have left it — one ``RAW_PHOTO`` / ``NEEDS_REVIEW`` record — plus
+    a sibling legacy ``image_metadata.json`` (the pre-M1
+    ``image_intake`` pipeline's output) marking that slab's green box
+    as detected. No calibration endpoint is called directly; the
+    promotion must happen purely from the on-disk shape via
+    rehydration, exactly as it would for a real operator restarting
+    the backend after upgrading."""
+    import json
+    from placement_engine.calibration import (
+        CalibrationRecord, CalibrationStatus, SourceType,
+    )
+    from placement_engine.calibration.storage import (
+        new_project, save_meta, save_records,
+    )
+
+    monkeypatch.setenv("AVANDAD_DATA_DIR", str(tmp_path / "data"))
+    _ensure_no_upload()
+
+    projects_root = tmp_path / "data" / "projects"
+    project = new_project(projects_root)
+
+    legacy_record = CalibrationRecord(
+        slab_id="LEGACY-1",
+        source_type=SourceType.RAW_PHOTO,
+        excel_width_mm=1600.0,
+        excel_height_mm=1600.0,
+        usable_width_mm=1560.0,
+        usable_height_mm=1560.0,
+        calibration_status=CalibrationStatus.NEEDS_REVIEW,
+        factory_policy_version="1.0",
+        original_image_path=str(project.original_images / "legacy.jpg"),
+        calibrated_image_path=str(project.calibrated_images / "LEGACY-1.jpg"),
+        calibration_confidence=0.4,
+        warnings=["low_confidence"],
+    )
+    save_records(project, [legacy_record])
+    save_meta(project, {
+        "session_id": project.session_id,
+        "uploaded_at": "2025-01-01T00:00:00+00:00",
+        "excel_filename": "legacy_export.xlsx",
+        "image_count": 1,
+        "factory_policy_version": "1.0",
+        "summary": {},
+    })
+    # The pre-M1 image_intake pipeline's output, sitting alongside the
+    # project exactly as an old install would have left it.
+    (project.root / "image_metadata.json").write_text(
+        json.dumps({"images": [
+            {"slab_id": "LEGACY-1", "green_box_detected": True},
+        ]}),
+        encoding="utf-8",
+    )
+
+    # Simulate a restart: drop the in-memory cache so the very next
+    # call rehydrates from disk instead of reusing a live session.
+    import placement_engine.api.inventory_upload as _iu
+    _iu._ACTIVE_UPLOAD = None
+
+    r = client.get("/api/calibration/records")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["active"] is True
+    record = next(
+        rec for rec in body["records"] if rec["slab_id"] == "LEGACY-1"
+    )
+    assert record["source_type"] == "green_boundary"
+    assert record["calibration_status"] == "approved"
+    assert record["approved_by"] == "legacy_migration"
+    assert body["counts"]["approved"] == 1
+    assert body["counts"]["needs_review"] == 0
+
+    # The promotion must also be PERSISTED back to disk, not just
+    # reflected in the in-memory response — a second restart (or a
+    # second read) should see the same approved state, not re-derive
+    # it from the stale needs_review record every time.
+    reloaded = json.loads(
+        project.calibrations_file.read_text(encoding="utf-8"),
+    )
+    persisted = next(
+        r for r in reloaded["records"] if r["slab_id"] == "LEGACY-1"
+    )
+    assert persisted["source_type"] == "green_boundary"
+    assert persisted["calibration_status"] == "approved"
     _ensure_no_upload()
 
 
@@ -1588,11 +1802,11 @@ def test_slab_image_safe_crop_after_upload():
     from placement_engine.api.inventory_upload import get_active_upload
     session = get_active_upload()
     assert session is not None
-    # Pick a slab with a linked image. We don't require green-box
-    # detection to have succeeded — the endpoint must serve SOMETHING
-    # in both branches.
+    # V1.2 — the calibration pipeline replaced the standalone green-box
+    # metadata. Look for any slab with a linked photo; the endpoint
+    # must serve SOMETHING in the safe-area branch either way.
     candidate = next(
-        (sid for sid in session.image_metadata_by_slab.keys()),
+        (r.slab_id for r in session.calibration_records if r.original_image_path),
         None,
     )
     if candidate is None:
@@ -1625,14 +1839,15 @@ def test_slab_crop_info_reports_availability():
     from placement_engine.api.inventory_upload import get_active_upload
     session = get_active_upload()
     assert session is not None
-    if not session.image_metadata_by_slab:
-        pytest.skip("crop pass didn't run — cannot exercise per-slab info")
-    sid = next(iter(session.image_metadata_by_slab))
+    if not session.calibration_records:
+        pytest.skip("upload produced no calibration records")
+    sid = session.calibration_records[0].slab_id
     info = client.get(f"/api/inventory/slab-crop-info/{sid}").json()
     assert "available" in info
     if info["available"]:
-        for k in ("crop_x", "crop_y", "crop_width", "crop_height"):
-            assert k in info
+        # V1.2 crop-info schema replaces crop_x/y/w/h with source
+        # metadata; every approved record reports its source_type.
+        assert "source_type" in info
     _ensure_no_upload()
 
 

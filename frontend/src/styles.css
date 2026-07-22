@@ -2970,6 +2970,12 @@ html, body, #root {
   border-radius: var(--radius-card);
   box-shadow: var(--shadow-card);
   overflow: hidden;
+  /* Cards sit inside flex columns (e.g. .step3) that scroll via
+   * overflow:auto. Without flex-shrink:0, a flex column squeezes
+   * items to fit BEFORE overflow kicks in, and this card's own
+   * overflow:hidden then clips its content instead of the intended
+   * outer scrollbar appearing. */
+  flex-shrink: 0;
 }
 .panel-card-head {
   display: flex;
@@ -4440,6 +4446,307 @@ html, body, #root {
   margin: 0;
   font-size: 11px;
   color: var(--color-muted);
+}
+
+/* =========================================================================
+ * Calibration workflow (M4) — Step 3's four-status review view.
+ * ========================================================================= */
+.calibration-summary { margin-bottom: var(--space-3); }
+.calibration-summary-line {
+  margin: 0;
+  font-size: 13px;
+  color: var(--color-text);
+}
+.calibration-summary-ready { color: #166534; font-weight: 600; }
+.calibration-error {
+  margin-bottom: var(--space-3);
+  padding: 8px 10px;
+  background: var(--color-red-soft);
+  color: #991b1b;
+  border-radius: var(--radius-control);
+  font-size: 12px;
+}
+.calibration-group + .calibration-group { margin-top: var(--space-4); }
+.calibration-group-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: var(--space-2);
+}
+.calibration-group-title {
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-muted);
+}
+.calibration-group-count {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--color-muted);
+  background: var(--color-surface-2);
+  border-radius: var(--radius-pill);
+  padding: 1px 7px;
+}
+.calibration-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.calibration-row {
+  display: grid;
+  grid-template-columns: 56px 1fr auto auto;
+  align-items: center;
+  gap: var(--space-3);
+  padding: 8px 10px;
+  background: var(--color-surface-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-control);
+}
+.calibration-row-thumb {
+  width: 56px;
+  height: 56px;
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--color-surface);
+  flex: 0 0 auto;
+}
+.calibration-row-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.calibration-row-thumb-empty {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 9px;
+  color: var(--color-muted);
+  text-align: center;
+  padding: 2px;
+}
+.calibration-row-info { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.calibration-row-id {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.calibration-row-dims {
+  display: flex;
+  gap: 10px;
+  font-size: 11px;
+  color: var(--color-muted);
+}
+.calibration-row-meta {
+  display: flex;
+  gap: 10px;
+  font-size: 11px;
+  color: var(--color-muted);
+}
+.calibration-row-status { flex: 0 0 auto; }
+.calibration-row-actions {
+  display: flex;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+.calibration-action-btn {
+  padding: 5px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  border-radius: var(--radius-control);
+  border: 1px solid var(--color-border-strong);
+  background: var(--color-surface);
+  color: var(--color-text);
+  cursor: pointer;
+}
+.calibration-action-btn:hover { background: var(--color-surface-2); }
+.calibration-action-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* Manual-review modal — corner drag / rotate / zoom / approve. */
+.calibration-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1100;
+  padding: 24px;
+}
+.calibration-modal {
+  background: var(--color-surface);
+  border-radius: var(--radius-card);
+  width: 100%;
+  max-width: 1080px;
+  max-height: 92vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: var(--shadow-card-lift);
+  overflow: hidden;
+}
+.calibration-modal-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--color-border);
+  flex: 0 0 auto;
+}
+.calibration-modal-title {
+  font-size: 15px;
+  margin: 0;
+  font-weight: 700;
+  color: var(--color-text);
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.calibration-modal-close {
+  width: 28px;
+  height: 28px;
+  border: none;
+  background: transparent;
+  border-radius: 4px;
+  font-size: 22px;
+  line-height: 1;
+  cursor: pointer;
+  color: var(--color-muted);
+}
+.calibration-modal-close:hover {
+  background: var(--color-surface-2);
+  color: var(--color-text);
+}
+.calibration-modal-body {
+  padding: var(--space-4);
+  overflow-y: auto;
+  flex: 1 1 auto;
+}
+.calibration-modal-panes {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-4);
+}
+@media (max-width: 860px) {
+  .calibration-modal-panes { grid-template-columns: 1fr; }
+}
+.calibration-modal-pane { min-width: 0; }
+.calibration-modal-pane-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-muted);
+  margin-bottom: 6px;
+}
+.calibration-modal-image-scroll {
+  position: relative;
+  height: 380px;
+  overflow: auto;
+  background: var(--color-surface-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-control);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.calibration-modal-image-wrap {
+  position: relative;
+  display: inline-block;
+  transform-origin: center;
+}
+.calibration-modal-image-wrap img {
+  display: block;
+  max-width: 100%;
+  max-height: 360px;
+}
+.calibration-corner-overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+.calibration-corner-quad {
+  fill: rgba(37, 99, 235, 0.12);
+  stroke: var(--color-blue);
+  stroke-width: 3;
+  vector-effect: non-scaling-stroke;
+}
+.calibration-corner-handle {
+  fill: var(--color-blue);
+  stroke: white;
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+  cursor: grab;
+  touch-action: none;
+}
+.calibration-corner-handle:active { cursor: grabbing; }
+.calibration-modal-preview-img {
+  max-width: 100%;
+  max-height: 360px;
+  display: block;
+}
+.calibration-modal-no-image {
+  padding: var(--space-4);
+  font-size: 13px;
+  color: var(--color-muted);
+  text-align: center;
+}
+.calibration-modal-controls {
+  display: flex;
+  gap: 6px;
+  margin-top: var(--space-2);
+  flex-wrap: wrap;
+}
+.calibration-modal-controls button {
+  padding: 6px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  border-radius: var(--radius-control);
+  border: 1px solid var(--color-border-strong);
+  background: var(--color-surface);
+  color: var(--color-text);
+  cursor: pointer;
+}
+.calibration-modal-controls button:disabled { opacity: 0.5; cursor: not-allowed; }
+.calibration-modal-warnings {
+  margin-top: var(--space-4);
+  padding: var(--space-3);
+  background: var(--color-amber-soft);
+  border-radius: var(--radius-control);
+  font-size: 12px;
+  color: #92400e;
+}
+.calibration-modal-warnings ul { margin: 6px 0 0 18px; padding: 0; }
+.calibration-modal-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 20px;
+  border-top: 1px solid var(--color-border);
+  flex: 0 0 auto;
+}
+.calibration-modal-foot-spacer { flex: 1 1 auto; }
+.calibration-modal-foot button {
+  padding: 8px 16px;
+  font-size: 13px;
+  font-weight: 600;
+  border-radius: var(--radius-control);
+  border: 1px solid var(--color-border-strong);
+  background: var(--color-surface);
+  color: var(--color-text);
+  cursor: pointer;
+}
+.calibration-modal-foot button:disabled { opacity: 0.5; cursor: not-allowed; }
+.calibration-modal-approve {
+  background: var(--color-green) !important;
+  border-color: var(--color-green) !important;
+  color: white !important;
 }
 
 /* =========================================================================

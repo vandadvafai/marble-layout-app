@@ -26,6 +26,30 @@ def _coerce_dims(rec: dict[str, Any]) -> tuple[float | None, float | None]:
     return wf, hf
 
 
+def _coerce_excel_dims(
+    rec: dict[str, Any], width_mm: float, height_mm: float,
+) -> tuple[float, float]:
+    """Return the physical (Excel) dimensions for labeling.
+
+    Falls back to the usable ``width_mm``/``height_mm`` when the
+    record has no ``excel_width_mm``/``excel_height_mm`` (inventories
+    that never went through calibration — demo fixtures, legacy
+    env-override sources — have no usable/physical distinction).
+    """
+    ew = rec.get("excel_width_mm")
+    eh = rec.get("excel_height_mm")
+    try:
+        ewf = float(ew) if ew is not None else None
+        ehf = float(eh) if eh is not None else None
+    except (TypeError, ValueError):
+        ewf = ehf = None
+    if ewf is None or ewf <= 0:
+        ewf = width_mm
+    if ehf is None or ehf <= 0:
+        ehf = height_mm
+    return ewf, ehf
+
+
 def _resolve_image(
     rec: dict[str, Any], base_dir: Path
 ) -> tuple[Path | None, bool, str | None]:
@@ -82,6 +106,7 @@ def load_inventory(clean_slabs_json: str | Path) -> Inventory:
             skipped.append(rec)
             continue
         image_path, image_available, placeholder = _resolve_image(rec, base_dir)
+        excel_wf, excel_hf = _coerce_excel_dims(rec, wf, hf)
         slabs.append(
             InventorySlab(
                 slab_id=str(rec["slab_id"]),
@@ -92,6 +117,8 @@ def load_inventory(clean_slabs_json: str | Path) -> Inventory:
                 item_code=(rec.get("item_code") or None),
                 width_mm=wf,
                 height_mm=hf,
+                excel_width_mm=excel_wf,
+                excel_height_mm=excel_hf,
                 area_m2=(
                     float(rec["area_m2"]) if rec.get("area_m2") is not None else None
                 ),

@@ -54,6 +54,16 @@ class InventorySlab:
     # `attach_processed_images()`. None when no crop is available;
     # callers should fall back to `image_path` in that case.
     processed_image_path: Path | None = None
+    # Physical (Excel-authoritative) dimensions, kept alongside the
+    # USABLE ``width_mm``/``height_mm`` for traceability. Calibration
+    # deducts 20 mm/side exactly once to produce the usable size;
+    # everything downstream (fit checker, DXF writer) must plan
+    # against ``width_mm``/``height_mm`` and only ever DISPLAY these
+    # excel_* fields in labels. Falls back to ``width_mm``/``height_mm``
+    # for inventories with no calibration step (demo / legacy sources),
+    # where physical and usable are the same value.
+    excel_width_mm: float | None = None
+    excel_height_mm: float | None = None
 
     def to_engine_slab(
         self,

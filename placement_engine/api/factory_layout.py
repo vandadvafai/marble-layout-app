@@ -30,11 +30,13 @@ from __future__ import annotations
 
 import io
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Iterable, Sequence
 
 import ezdxf
 import ezdxf.enums
+
+from placement_engine.calibration.policy import INTER_PIECE_SPACING_MM
 
 
 # ---------------------------------------------------------------------------
@@ -95,10 +97,18 @@ class MarginPolicy:
     piece IS the slab. The new defaults treat exact-edge as a
     warning (visible to the operator, not a hard block) and reduce
     the automatic slab reduction to kerf + tolerance.
+
+    ``edge_trim_mm`` defaults to 0 because the confirmed factory
+    policy already deducts 20 mm/side ONCE, inside calibration (see
+    ``placement_engine.calibration.policy.EDGE_DEDUCTION_MM``) — the
+    slab dimensions this module receives are already the usable
+    rectangle. Anything nonzero here would deduct the edge a SECOND
+    time. Set it explicitly only for a manual/legacy inventory that
+    was never calibrated and still carries its raw physical size.
     """
 
     blade_kerf_mm: float = 3.0
-    edge_trim_mm: float = 5.0
+    edge_trim_mm: float = 0.0
     tolerance_mm: float = 2.0
     # V1 default: slab dimensions imported into Layout Helper are
     # already preprocessed by the factory (safe-crop inside the
@@ -225,6 +235,23 @@ class AssignmentInput:
     rotation_needed: bool = False
     waste_fraction: float | None = None
     slab_serial: str | None = None
+    # Physical (Excel-authoritative) slab size, for DXF labels ONLY —
+    # every geometric computation (fit check, boundary rect, piece
+    # placement) uses ``slab_width_mm``/``slab_height_mm`` (the
+    # usable rectangle). Falls back to those same values when the
+    # source inventory has no calibration record to trace back to.
+    excel_width_mm: float | None = None
+    excel_height_mm: float | None = None
+
+    @property
+    def label_width_mm(self) -> float:
+        """Physical dim for the DXF label, falling back to the usable
+        (geometric) width when the source has no Excel traceability."""
+        return self.excel_width_mm if self.excel_width_mm else self.slab_width_mm
+
+    @property
+    def label_height_mm(self) -> float:
+        return self.excel_height_mm if self.excel_height_mm else self.slab_height_mm
 
 
 # ---------------------------------------------------------------------------
@@ -694,10 +721,14 @@ def build_factory_dxf_bytes(
             align=ezdxf.enums.TextEntityAlignment.LEFT,
         )
 
-        # Slab dims — under the slab id. On the DIMENSIONS layer so
-        # dimension-only viewers pick them up.
+        # Slab dims — under the slab id. Physical (Excel) size is the
+        # traceable label; the usable rectangle (what's actually cut
+        # against — the SLAB_BOUNDARY geometry) is noted alongside it.
+        # On the DIMENSIONS layer so dimension-only viewers pick them
+        # up.
         dims = (
-            f"slab {a.slab_width_mm:.0f} × {a.slab_height_mm:.0f} mm"
+            f"slab {a.label_width_mm:.0f} × {a.label_height_mm:.0f} mm"
+            f" (usable {a.slab_width_mm:.0f} × {a.slab_height_mm:.0f} mm)"
         )
         dims_txt = msp.add_text(
             dims, height=text_h * 0.55,
@@ -794,10 +825,12 @@ def build_single_slab_dxf_bytes(
       * Dashed usable area on ``SLAB_USABLE_AREA`` inside the
         boundary.
       * Every piece assigned to this slab rendered on
-        ``CUT_PIECES`` at the ``edge_trim + kerf`` offset. When
-        multiple pieces share a slab they are stacked vertically
-        inside the usable area (a simple "shelf" packer — one
-        piece per row) so cuts don't overlap.
+        ``CUT_PIECES`` at the ``edge_trim + kerf`` offset from the
+        slab's usable-area origin. When multiple pieces share a slab
+        they are stacked vertically inside the usable area (a simple
+        "shelf" packer — one piece per row) separated by the fixed
+        ``INTER_PIECE_SPACING_MM`` (5 mm, not kerf) so cuts don't
+        overlap.
       * ``LABELS`` — slab id header + per-piece labels centred
         inside each piece.
       * ``DIMENSIONS`` — slab and per-piece dimension text.
@@ -822,7 +855,6 @@ def build_single_slab_dxf_bytes(
     msp = doc.modelspace()
 
     text_h = _label_text_height(max(sw, sh))
-    inset = policy.edge_trim_mm + policy.blade_kerf_mm
 
     # Slab boundary (closed).
     msp.add_lwpolyline(
@@ -855,8 +887,10 @@ def build_single_slab_dxf_bytes(
         (0.0, sh + text_h * 0.4),
         align=ezdxf.enums.TextEntityAlignment.LEFT,
     )
+    label_w = slab_assignments[0].label_width_mm
+    label_h = slab_assignments[0].label_height_mm
     msp.add_text(
-        f"slab {sw:.0f} × {sh:.0f} mm",
+        f"slab {label_w:.0f} × {label_h:.0f} mm (usable {sw:.0f} × {sh:.0f} mm)",
         height=text_h * 0.55,
         dxfattribs={"layer": "DIMENSIONS"},
     ).set_placement(
@@ -871,9 +905,10 @@ def build_single_slab_dxf_bytes(
 
     # Shelf packer: stack pieces vertically inside the usable area.
     # Every piece gets the LEFT edge of the usable region as its x
-    # origin; y advances by piece_height + kerf per row. This isn't
-    # optimal packing, but it's deterministic, easy for the operator
-    # to read, and the common case is 1 piece / slab anyway.
+    # origin; y advances by piece_height + INTER_PIECE_SPACING_MM per
+    # row (the factory's fixed 5 mm gap — no kerf added on top). This
+    # isn't optimal packing, but it's deterministic, easy for the
+    # operator to read, and the common case is 1 piece / slab anyway.
     y_cursor = policy.edge_trim_mm + policy.blade_kerf_mm
     for a in slab_assignments:
         # Rotate the polygon around its own centroid so the bbox is
@@ -943,7 +978,11 @@ def build_single_slab_dxf_bytes(
                 align=ezdxf.enums.TextEntityAlignment.LEFT,
             )
 
-        y_cursor += rh + policy.blade_kerf_mm * 2.0 + policy.edge_trim_mm
+        # Factory policy: exactly 5 mm total between neighbouring cut
+        # contours on the same slab — this IS the spacing, not an
+        # addition on top of the blade kerf (see
+        # ``placement_engine.calibration.policy.INTER_PIECE_SPACING_MM``).
+        y_cursor += rh + INTER_PIECE_SPACING_MM
 
     sink = io.StringIO()
     doc.write(sink)

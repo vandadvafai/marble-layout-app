@@ -18,7 +18,6 @@ so it stands alone regardless of what conftest.py did.
 from __future__ import annotations
 
 import io
-from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -31,14 +30,22 @@ client = TestClient(app)
 
 
 @pytest.fixture(autouse=True)
-def _reset_state(monkeypatch):
-    """Every test in this module starts with no env override and no
-    uploaded session — the "fresh laptop" baseline."""
+def _reset_state(monkeypatch, tmp_path):
+    """Every test in this module starts with no env override, no
+    uploaded session, and its own ``AVANDAD_DATA_DIR`` — the "fresh
+    laptop" baseline."""
     monkeypatch.delenv("AVANDAD_INVENTORY_PATH", raising=False)
     monkeypatch.delenv("STONELAYOUT_INVENTORY_PATH", raising=False)
+    monkeypatch.setenv("AVANDAD_DATA_DIR", str(tmp_path / "data"))
     clear_active_upload()
+    # Also drop any in-memory cached session so
+    # ``get_active_upload()`` doesn't rehydrate from a previous
+    # test's project directory.
+    import placement_engine.api.inventory_upload as _iu
+    _iu._ACTIVE_UPLOAD = None
     yield
     clear_active_upload()
+    _iu._ACTIVE_UPLOAD = None
 
 
 # ---------------------------------------------------------------------------
@@ -190,7 +197,9 @@ def _build_missing_columns_excel_bytes() -> tuple[bytes, str]:
 def test_upload_accepts_english_column_names():
     """An English-header Excel matches Persian aliases in the column
     map — a non-Persian ERP can drive the upload endpoint without
-    the operator translating headers first."""
+    the operator translating headers first. Under V1.2 the slabs
+    are ``missing_photo`` until a real image is uploaded, but the
+    upload must still succeed and both rows must be visible."""
     data, name = _build_english_excel_bytes()
     r = client.post(
         "/api/inventory/upload",
@@ -201,7 +210,9 @@ def test_upload_accepts_english_column_names():
     )
     assert r.status_code == 200, r.text
     body = r.json()
-    assert body["summary"]["valid_slabs"] == 2
+    cal = body["summary"]["calibration"]
+    assert cal["missing_photo"] == 2
+    assert cal["approved"] == 0
 
 
 def test_upload_rejects_missing_required_columns():
@@ -254,8 +265,10 @@ def test_two_projects_do_not_share_slabs():
                          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
     )
     assert r_a.status_code == 200
-    info_a = client.get("/api/inventory/info").json()
-    assert info_a["valid_count"] == 1
+    cal_a = client.get("/api/calibration/records").json()
+    assert cal_a["counts"]["missing_photo"] == 1
+    slab_ids_a = {r["slab_id"] for r in cal_a["records"]}
+    assert slab_ids_a == {"A-1"}
 
     # Start new project — the frontend hits this endpoint too.
     r_del = client.delete("/api/inventory/current")
@@ -267,17 +280,80 @@ def test_two_projects_do_not_share_slabs():
                          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
     )
     assert r_b.status_code == 200
-    info_b = client.get("/api/inventory/info").json()
-    assert info_b["valid_count"] == 2
-    # And project A's slab id must NOT be reachable — the matcher
-    # only sees project B's inventory.
-    ids = {
-        r["slab_id"]
-        for r in client.get("/api/inventory/current").json()
-                     .get("summary", {})
-                     .get("preview", [])
+    cal_b = client.get("/api/calibration/records").json()
+    assert cal_b["counts"]["missing_photo"] == 2
+    slab_ids_b = {r["slab_id"] for r in cal_b["records"]}
+    assert slab_ids_b == {"B-1", "B-2"}
+    # Project A's slab MUST NOT leak into project B's inventory.
+    assert "A-1" not in slab_ids_b
+
+
+# ---------------------------------------------------------------------------
+# Restart survival — approved slabs persist across a process restart
+# ---------------------------------------------------------------------------
+
+
+def test_upload_survives_process_restart():
+    """Upload a project, approve one of its slabs, then simulate a
+    backend restart (drop the in-memory ``_ACTIVE_UPLOAD`` cache
+    without touching disk — that's exactly what happens when the
+    process exits and a new one boots). The very next
+    ``get_active_upload()`` call must rehydrate the SAME project
+    from its on-disk ``calibrations.json``, with the approved slab
+    still approved and every other record intact."""
+    from openpyxl import Workbook
+    import placement_engine.api.inventory_upload as _iu
+
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["Serial", "Width (cm)", "Height (cm)"])
+    ws.append(["R-1", 150, 200])
+    ws.append(["R-2", 160, 220])
+    buf = io.BytesIO()
+    wb.save(buf)
+
+    r = client.post(
+        "/api/inventory/upload",
+        files={"excel": ("restart.xlsx", buf.getvalue(),
+                         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+    )
+    assert r.status_code == 200, r.text
+    session_id_before = r.json()["session_id"]
+
+    # Both rows land as missing_photo (no images in this fixture).
+    # Force-approve one the way the review UI's Approve button does.
+    approve = client.post(
+        "/api/calibration/R-1/status", json={"status": "approved"},
+    )
+    assert approve.status_code == 200, approve.text
+
+    records_before = {
+        rec["slab_id"]: rec
+        for rec in client.get("/api/calibration/records").json()["records"]
     }
-    assert not (ids & {"A-1"})
+    assert records_before["R-1"]["calibration_status"] == "approved"
+    assert records_before["R-2"]["calibration_status"] == "missing_photo"
+
+    # --- simulate a process restart ---
+    # A real restart loses the module-level cache but NOT the project
+    # directory on disk. Do NOT call clear_active_upload() here — that
+    # deletes the directory, which is exactly the "Start new project"
+    # action, not a restart.
+    _iu._ACTIVE_UPLOAD = None
+
+    current = client.get("/api/inventory/current").json()
+    assert current["active"] is True
+    assert current["session_id"] == session_id_before
+
+    records_after = {
+        rec["slab_id"]: rec
+        for rec in client.get("/api/calibration/records").json()["records"]
+    }
+    assert records_after.keys() == records_before.keys()
+    assert records_after["R-1"]["calibration_status"] == "approved"
+    assert records_after["R-1"]["approved_by"] == records_before["R-1"]["approved_by"]
+    assert records_after["R-1"]["approved_at"] == records_before["R-1"]["approved_at"]
+    assert records_after["R-2"]["calibration_status"] == "missing_photo"
 
 
 # ---------------------------------------------------------------------------

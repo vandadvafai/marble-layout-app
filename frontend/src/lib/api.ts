@@ -5,6 +5,9 @@
 
 import { cutDimsForPiece } from "./pieceGeom";
 import type {
+  CalibrationRecord,
+  CalibrationRecordsResponse,
+  CalibrationStatus,
   DemoIndexResponse,
   DemoLayoutResponse,
   InventoryCurrentResponse,
@@ -13,6 +16,7 @@ import type {
   InventoryUploadResponse,
   Piece,
   Plan,
+  Point,
   RegenerateLayoutResponse,
   ValidationResult,
 } from "./types";
@@ -231,4 +235,75 @@ export function postMatchInventory(
     `/demo-layouts/${encodeURIComponent(demoId)}/match-inventory`,
     body,
   );
+}
+
+// ---------------------------------------------------------------------------
+// Slab calibration (M4 — Calibration UI & Workflow).
+// ---------------------------------------------------------------------------
+
+/** Every calibration record for the active upload, grouped by the
+ *  panel into Approved / Needs Review / Missing Photo / Rejected. */
+export function fetchCalibrationRecords(): Promise<CalibrationRecordsResponse> {
+  return fetchJson<CalibrationRecordsResponse>("/calibration/records");
+}
+
+/** URL for the raw, as-uploaded photo — the manual-review modal's
+ *  left-hand image the operator drags corners on. */
+export function calibrationOriginalImageUrl(slabId: string): string {
+  return `${BASE}/calibration/${encodeURIComponent(slabId)}/original-image`;
+}
+
+/** URL for the perspective-corrected preview. ``cacheBust`` should be
+ *  a value that changes whenever the record is recalibrated (e.g.
+ *  ``approved_at``) so the browser doesn't serve a stale image from
+ *  its HTTP cache after a corner adjustment. */
+export function calibrationImageUrl(
+  slabId: string, cacheBust?: string | null,
+): string {
+  const url = `${BASE}/calibration/${encodeURIComponent(slabId)}/calibrated-image`;
+  return cacheBust ? `${url}?v=${encodeURIComponent(cacheBust)}` : url;
+}
+
+/** Approve / reject a record as-is (no corner changes). Adopts the
+ *  detected corners as confirmed when approving fresh. */
+export function setCalibrationStatus(
+  slabId: string, status: CalibrationStatus,
+): Promise<{ record: CalibrationRecord }> {
+  return postJson<{ record: CalibrationRecord }>(
+    `/calibration/${encodeURIComponent(slabId)}/status`,
+    { status },
+  );
+}
+
+/** Re-rectify a slab with operator-adjusted corners. The backend
+ *  regenerates the calibrated image AND approves the record — moving
+ *  a corner is the operator vouching for it. */
+export function submitManualCorners(
+  slabId: string, corners: Point[],
+): Promise<{ record: CalibrationRecord }> {
+  return postJson<{ record: CalibrationRecord }>(
+    `/calibration/${encodeURIComponent(slabId)}/manual-corners`,
+    { corners },
+  );
+}
+
+/** Swap a slab's source photo and re-run the same classifier every
+ *  other slab goes through. */
+export async function replaceSlabImage(
+  slabId: string, file: File,
+): Promise<{ record: CalibrationRecord }> {
+  const form = new FormData();
+  form.append("image", file, file.name);
+  const res = await fetch(
+    `${BASE}/calibration/${encodeURIComponent(slabId)}/replace-image`,
+    { method: "POST", body: form },
+  );
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    throw new Error(
+      `Replace image failed: ${res.status} ${res.statusText}` +
+        (detail ? ` — ${detail}` : ""),
+    );
+  }
+  return (await res.json()) as { record: CalibrationRecord };
 }

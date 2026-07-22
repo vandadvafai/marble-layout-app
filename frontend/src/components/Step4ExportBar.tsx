@@ -218,9 +218,10 @@ function Step4ExportBarImpl({
 
       {/* Advanced Factory Settings toggle (V1.2). Off by default:
           the app treats the imported slab dims as usable area
-          (safe-crop is already applied at import time). Toggle on
-          to expose blade kerf / trim / tolerance controls + the
-          Strict/Standard/Exact profile picker. */}
+          (calibration already deducts the 20mm/side edge trim once,
+          at import time — see placement_engine/calibration/policy.py).
+          Toggle on to expose blade kerf / trim / tolerance controls +
+          the Strict/Standard/Exact profile picker. */}
       <div className="step4-mfg-toggle-row">
         <button
           type="button"

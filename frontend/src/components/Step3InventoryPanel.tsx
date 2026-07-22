@@ -14,14 +14,18 @@
 
 import { useRef, useState } from "react";
 
+import CalibrationPanel from "./CalibrationPanel";
+import CalibrationReviewModal from "./CalibrationReviewModal";
 import PanelCard from "./ui/PanelCard";
 import StatusPill from "./ui/StatusPill";
 import {
   clearUploadedInventory, fetchInventoryInfo, uploadInventory,
 } from "../lib/api";
 import type {
-  InventoryInfo, InventoryPreviewRow, InventoryUploadSummary,
+  CalibrationRecord, CalibrationRecordsResponse, InventoryInfo,
+  InventoryPreviewRow, InventoryUploadSummary,
 } from "../lib/types";
+import { calibrationCounts, inventorySummaryDisplay } from "../lib/workflow";
 
 
 interface Props {
@@ -38,6 +42,11 @@ interface Props {
     excelName: string | null,
     imageCount: number,
   ) => void;
+  /** Calibration records for the active upload (M4). ``null`` /
+   *  ``active: false`` covers both "nothing uploaded yet" and
+   *  "the active inventory is a demo/env-override source". */
+  calibration: CalibrationRecordsResponse | null;
+  onCalibrationChange: (updated: CalibrationRecordsResponse) => void;
   onContinue: () => void;
   canContinue: boolean;
 }
@@ -45,6 +54,7 @@ interface Props {
 export default function Step3InventoryPanel({
   info, infoError, onInfoChange,
   uploadSummary, uploadExcelName, uploadImageCount, onUploadResult,
+  calibration, onCalibrationChange,
   onContinue, canContinue,
 }: Props) {
   const xlsxRef = useRef<HTMLInputElement>(null);
@@ -55,10 +65,31 @@ export default function Step3InventoryPanel({
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [devOpen, setDevOpen] = useState(false);
+  const [reviewingSlab, setReviewingSlab] = useState<CalibrationRecord | null>(null);
+
+  const applyRecordsUpdate = (records: CalibrationRecord[]) => {
+    if (!calibration) return;
+    onCalibrationChange({
+      ...calibration, records, counts: calibrationCounts(records),
+    });
+  };
 
   const summary = uploadSummary;
   const excelName = uploadExcelName;
   const imageCount = uploadImageCount;
+
+  // M5: the calibration workflow can change a slab's status
+  // (approve / reject / manual corners / replace image) without a
+  // new Excel upload. ``inventorySummaryDisplay`` reads the LIVE
+  // calibration records in that case — not the frozen `/upload`
+  // response snapshot in ``summary`` — so this card can never
+  // contradict the Calibration panel or the Step-4 gate right
+  // beneath it.
+  const {
+    validSlabs: displayValidSlabs,
+    invalidSlabs: displayInvalidSlabs,
+    slabsWithoutPhotos: displaySlabsWithoutPhotos,
+  } = inventorySummaryDisplay(calibration, summary);
 
   const onSubmit = async () => {
     if (!excelFile) {
@@ -95,8 +126,15 @@ export default function Step3InventoryPanel({
     }
   };
 
-  const hasValidSlabs = summary !== null && summary.valid_slabs > 0;
-  const continueEnabled = canContinue && hasValidSlabs;
+  // M4: ``canContinue`` (App's ``gates[4].reached``) is already the
+  // single, live-updating source of truth for "is Step 4 unlocked" —
+  // it's driven by ``isInventoryReady``, which reads the CURRENT
+  // calibration counts. A second local check against
+  // ``uploadSummary.valid_slabs`` used to duplicate this, but that
+  // value is a snapshot from the last `/upload` response and never
+  // refreshes after an approve/reject/replace-image action, so it
+  // could silently disagree with (and override) the correct gate.
+  const continueEnabled = canContinue;
 
   return (
     <div className="step3 step3-v1">
@@ -239,7 +277,7 @@ export default function Step3InventoryPanel({
           title="Inventory summary"
           icon={<DocGlyph />}
           headerAction={
-            summary.valid_slabs > 0
+            displayValidSlabs > 0
               ? <StatusPill tone="green">validated</StatusPill>
               : <StatusPill tone="red">no valid slabs</StatusPill>
           }
@@ -259,13 +297,13 @@ export default function Step3InventoryPanel({
             <div className="step3-summary-stats">
               <SummaryStat
                 label="Slabs detected"
-                value={summary.valid_slabs}
-                tone={summary.valid_slabs > 0 ? "green" : "red"}
+                value={displayValidSlabs}
+                tone={displayValidSlabs > 0 ? "green" : "red"}
               />
               <SummaryStat
                 label="Invalid rows"
-                value={summary.invalid_slabs}
-                tone={summary.invalid_slabs > 0 ? "amber" : "grey"}
+                value={displayInvalidSlabs}
+                tone={displayInvalidSlabs > 0 ? "amber" : "grey"}
               />
               <SummaryStat
                 label="Photos uploaded"
@@ -285,7 +323,7 @@ export default function Step3InventoryPanel({
             </div>
 
             {(summary.unmatched_photos.length > 0
-              || summary.slabs_without_photos.length > 0) && (
+              || displaySlabsWithoutPhotos.length > 0) && (
               <div className="step3-issue-list">
                 {summary.unmatched_photos.length > 0 && (
                   <div className="step3-issue">
@@ -300,13 +338,13 @@ export default function Step3InventoryPanel({
                     </span>
                   </div>
                 )}
-                {summary.slabs_without_photos.length > 0 && (
+                {displaySlabsWithoutPhotos.length > 0 && (
                   <div className="step3-issue">
                     <StatusPill tone="grey">
-                      {summary.slabs_without_photos.length}{" "}no photo
+                      {displaySlabsWithoutPhotos.length}{" "}no photo
                     </StatusPill>
                     <span className="step3-issue-text">
-                      slab{summary.slabs_without_photos.length === 1 ? "" : "s"}
+                      slab{displaySlabsWithoutPhotos.length === 1 ? "" : "s"}
                       {" "}upload without an image — still assignable in Step 4.
                     </span>
                   </div>
@@ -324,6 +362,30 @@ export default function Step3InventoryPanel({
             )}
           </div>
         </PanelCard>
+      )}
+
+      {calibration && calibration.active && (
+        <CalibrationPanel
+          records={calibration.records}
+          counts={calibration.counts}
+          onRecordsChange={applyRecordsUpdate}
+          onReview={(record) => setReviewingSlab(record)}
+        />
+      )}
+
+      {reviewingSlab && (
+        <CalibrationReviewModal
+          record={reviewingSlab}
+          onClose={() => setReviewingSlab(null)}
+          onRecordChange={(updated) => {
+            applyRecordsUpdate(
+              (calibration?.records ?? []).map(
+                (r) => (r.slab_id === updated.slab_id ? updated : r),
+              ),
+            );
+            setReviewingSlab(updated);
+          }}
+        />
       )}
 
       <details

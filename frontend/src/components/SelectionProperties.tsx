@@ -161,36 +161,41 @@ function PieceBody({
   const hasSlabImage = !!assignedSlabId
     && !!assignedCandidate?.image_path;
 
-  // 0.1.47 — fetch the safe-crop availability flag for the
-  // currently-selected slab. The state is null while in flight;
-  // true / false once resolved. Drives the "Safe crop not detected"
-  // warning chip under the photo. We cancel in-flight requests when
-  // the user clicks a different piece so a slow response never
-  // overwrites the fresh slab's state.
-  const [safeCrop, setSafeCrop] = useState<
+  // 0.1.47 — fetch the calibration-crop availability flag for the
+  // currently-selected slab (M4.5: renamed from "safe crop" — this
+  // is the same calibrated-crop concept the Step-3 calibration
+  // workflow now surfaces explicitly, just read here for the Step-2
+  // piece properties panel. The endpoint path and query param are
+  // unchanged wire contracts; only the user-facing label changed).
+  // The state is null while in flight; true / false once resolved.
+  // Drives the "Calibration not detected" warning chip under the
+  // photo. We cancel in-flight requests when the user clicks a
+  // different piece so a slow response never overwrites the fresh
+  // slab's state.
+  const [calibrationInfo, setCalibrationInfo] = useState<
     { available: boolean; reason?: string } | null
   >(null);
   useEffect(() => {
     if (!assignedSlabId) {
-      setSafeCrop(null);
+      setCalibrationInfo(null);
       return;
     }
     let cancelled = false;
-    setSafeCrop(null);
+    setCalibrationInfo(null);
     fetch(
       `/api/inventory/slab-crop-info/${encodeURIComponent(assignedSlabId)}`,
     )
       .then((r) => r.json())
       .then((info) => {
         if (cancelled) return;
-        setSafeCrop({
+        setCalibrationInfo({
           available: !!info.available,
           reason: info.reason,
         });
       })
       .catch(() => {
         if (cancelled) return;
-        setSafeCrop({ available: false, reason: "fetch_error" });
+        setCalibrationInfo({ available: false, reason: "fetch_error" });
       });
     return () => { cancelled = true; };
   }, [assignedSlabId]);
@@ -232,17 +237,17 @@ function PieceBody({
                 )}
               </span>
             )}
-            {/* Safe-crop status. Drawn only after the fetch resolves
-                so the panel doesn't flicker "warning" on a slab that
-                actually has detection. */}
-            {hasSlabImage && safeCrop && !safeCrop.available && (
+            {/* Calibration status. Drawn only after the fetch
+                resolves so the panel doesn't flicker "warning" on a
+                slab that actually has detection. */}
+            {hasSlabImage && calibrationInfo && !calibrationInfo.available && (
               <span className="props-slab-photo-warn">
-                Safe crop not detected — using full image.
+                Calibration not detected — using full image.
               </span>
             )}
-            {hasSlabImage && safeCrop && safeCrop.available && (
+            {hasSlabImage && calibrationInfo && calibrationInfo.available && (
               <span className="props-slab-photo-ok">
-                Safe crop applied
+                Calibration applied
               </span>
             )}
           </div>
@@ -342,13 +347,13 @@ function PieceBody({
             </span>
           </div>
           <div className="props-row">
-            <span className="props-label">Safe crop</span>
+            <span className="props-label">Calibration</span>
             <span className="props-value">
               {!hasSlabImage
                 ? <span className="props-value-aux">no photo</span>
-                : safeCrop === null
+                : calibrationInfo === null
                   ? <span className="props-value-aux">checking…</span>
-                  : safeCrop.available
+                  : calibrationInfo.available
                     ? <span className="props-slab-photo-ok">applied</span>
                     : <span className="props-slab-photo-warn">fallback (full image)</span>}
             </span>

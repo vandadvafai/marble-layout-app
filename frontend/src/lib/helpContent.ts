@@ -160,6 +160,98 @@ const EN: HelpContent = {
       ],
     },
     {
+      heading: "Slab Calibration",
+      blocks: [
+        {
+          kind: "p",
+          text:
+            "Every slab photo goes through automatic calibration "
+            + "before it can be assigned to a piece. Calibration "
+            + "finds the slab's real edges in the photo and "
+            + "produces a corrected, straightened image sized to "
+            + "the slab's usable area.",
+        },
+        {
+          kind: "ul",
+          intro: "Supported photo types:",
+          items: [
+            "Existing green boundary — a bright green rectangle "
+              + "marks the slab in the photo. Approved automatically.",
+            "Already scanned / cropped — the photo is already a "
+              + "clean, cropped shot of just the slab. Approved "
+              + "automatically.",
+            "Raw photograph — an uncropped photo of the slab. The "
+              + "system detects the four corners automatically; "
+              + "high-confidence detections are approved "
+              + "automatically, low-confidence ones need a quick "
+              + "manual check.",
+          ],
+        },
+        {
+          kind: "p",
+          text:
+            "The Excel width and height are always the physical, "
+            + "real-world slab size — that number never changes "
+            + "and is kept for traceability. The system "
+            + "automatically removes 20 mm from every side (40 mm "
+            + "off each dimension) to get the usable size — the "
+            + "area that's actually safe to cut pieces from. This "
+            + "20 mm/side deduction happens once, automatically, "
+            + "during calibration; you never need to account for "
+            + "it yourself anywhere else.",
+        },
+        {
+          kind: "p",
+          text:
+            "\"Usable\" dimensions are what Layout Helper, the fit "
+            + "checker, and the factory DXF all plan against. "
+            + "\"Excel\" (physical) dimensions are shown alongside "
+            + "for traceability and appear on the factory DXF "
+            + "labels, but never drive the cutting geometry.",
+        },
+        {
+          kind: "ul",
+          intro: "A slab needs manual review when:",
+          items: [
+            "the detector's confidence is low,",
+            "the photo's proportions don't closely match the "
+              + "Excel width/height,",
+            "the slab's edge looks irregular, broken, or "
+              + "non-rectangular,",
+            "no clear outline could be detected at all.",
+          ],
+        },
+        {
+          kind: "p",
+          text:
+            "Needs Review is not a rejection — open the slab, "
+            + "check or adjust the four corners, and approve or "
+            + "reject it yourself. A slab is only ever rejected "
+            + "automatically for a hard mismatch; borderline cases "
+            + "always wait for a person.",
+        },
+        {
+          kind: "p",
+          text:
+            "A slab uploaded with no photo is blocked (\"Missing "
+            + "Photo\") until you add one — Layout Helper can't "
+            + "confirm a slab's real shape without a photo, so it "
+            + "can't be assigned or exported. Step 4 stays locked "
+            + "until every slab in the project is either Approved "
+            + "or Rejected — only Approved slabs can be assigned "
+            + "to a piece.",
+        },
+        {
+          kind: "p",
+          text:
+            "When more than one piece is cut from the same slab, "
+            + "the factory plan leaves exactly 5 mm of spacing "
+            + "between neighbouring cuts — enough room for the "
+            + "blade, already built into the layout.",
+        },
+      ],
+    },
+    {
       heading: "Step 4 — Assign Slabs",
       blocks: [
         { kind: "p", text: 'Use "Auto Assign Best Slabs".' },
@@ -311,6 +403,93 @@ const FA: HelpContent = {
         {
           kind: "p",
           text: "سیستم ناحیه قابل استفاده سنگ را تشخیص می‌دهد.",
+        },
+      ],
+    },
+    {
+      heading: "کالیبراسیون اسلب",
+      blocks: [
+        {
+          kind: "p",
+          text:
+            "هر عکس اسلب پیش از تخصیص به قطعه، به‌صورت خودکار "
+            + "کالیبره می‌شود. کالیبراسیون لبه‌های واقعی اسلب را در "
+            + "عکس تشخیص می‌دهد و یک تصویر اصلاح‌شده و صاف، متناسب "
+            + "با ابعاد قابل استفادهٔ اسلب، تولید می‌کند.",
+        },
+        {
+          kind: "ul",
+          intro: "انواع عکس پشتیبانی‌شده:",
+          items: [
+            "کادر سبز موجود — یک مستطیل سبز روشن اسلب را در عکس "
+              + "مشخص می‌کند. به‌صورت خودکار تأیید می‌شود.",
+            "اسکن‌شده یا برش‌خورده — عکس از قبل فقط شامل اسلب و "
+              + "بدون حاشیهٔ اضافه است. به‌صورت خودکار تأیید می‌شود.",
+            "عکس خام — عکسی بدون برش از اسلب. سیستم چهار گوشهٔ "
+              + "اسلب را به‌صورت خودکار تشخیص می‌دهد؛ تشخیص‌های با "
+              + "اطمینان بالا خودکار تأیید می‌شوند و موارد با "
+              + "اطمینان پایین نیاز به بررسی دستی سریع دارند.",
+          ],
+        },
+        {
+          kind: "p",
+          text:
+            "عرض و طول اکسل همیشه ابعاد فیزیکی و واقعی اسلب هستند "
+            + "— این عدد هرگز تغییر نمی‌کند و برای ردیابی نگه‌داشته "
+            + "می‌شود. سیستم به‌صورت خودکار ۲۰ میلی‌متر از هر طرف "
+            + "(۴۰ میلی‌متر از هر بُعد) کم می‌کند تا ابعاد قابل "
+            + "استفاده به‌دست آید — ناحیه‌ای که برش قطعات از آن "
+            + "واقعاً ایمن است. این کسر ۲۰ میلی‌متری از هر طرف فقط "
+            + "یک‌بار و به‌صورت خودکار، در زمان کالیبراسیون انجام "
+            + "می‌شود؛ نیازی نیست خودتان آن را جای دیگری دوباره "
+            + "محاسبه کنید.",
+        },
+        {
+          kind: "p",
+          text:
+            "ابعاد «قابل استفاده» همان چیزی است که چیدمان، بررسی "
+            + "تناسب و فایل DXF کارخانه بر اساس آن برنامه‌ریزی "
+            + "می‌کنند. ابعاد «اکسل» (فیزیکی) نیز برای ردیابی در "
+            + "کنار آن نمایش داده می‌شود و روی برچسب‌های DXF کارخانه "
+            + "دیده می‌شود، اما هرگز هندسهٔ برش را تعیین نمی‌کند.",
+        },
+        {
+          kind: "ul",
+          intro: "بررسی دستی اسلب در این موارد لازم است:",
+          items: [
+            "اطمینان تشخیص پایین باشد،",
+            "نسبت ابعاد عکس با عرض/طول اکسل همخوانی نزدیکی نداشته باشد،",
+            "لبهٔ اسلب نامنظم، شکسته یا غیرمستطیلی به نظر برسد،",
+            "هیچ خط مرزی مشخصی اصلاً قابل تشخیص نباشد.",
+          ],
+        },
+        {
+          kind: "p",
+          text:
+            "«نیاز به بررسی» به معنای رد شدن نیست — اسلب را باز "
+            + "کنید، چهار گوشه را بررسی یا تنظیم کنید و خودتان آن "
+            + "را تأیید یا رد کنید. سیستم فقط در ناهماهنگی‌های شدید "
+            + "به‌صورت خودکار اسلب را رد می‌کند؛ موارد مرزی همیشه "
+            + "منتظر بررسی انسانی می‌مانند.",
+        },
+        {
+          kind: "p",
+          text:
+            "اسلبی که بدون عکس بارگذاری شده باشد («بدون عکس») "
+            + "مسدود می‌ماند تا زمانی که عکسی برای آن اضافه کنید — "
+            + "چیدمان بدون عکس نمی‌تواند شکل واقعی اسلب را تأیید "
+            + "کند، بنابراین قابل تخصیص یا خروجی گرفتن نیست. مرحلهٔ "
+            + "۴ تا زمانی که همهٔ اسلب‌های پروژه یا تأیید یا رد شده "
+            + "باشند قفل می‌ماند — فقط اسلب‌های تأییدشده قابل "
+            + "تخصیص به قطعات هستند.",
+        },
+        {
+          kind: "p",
+          text:
+            "وقتی بیش از یک قطعه از یک اسلب برش می‌خورد، نقشهٔ "
+            + "کارخانه دقیقاً ۵ میلی‌متر فاصله بین برش‌های مجاور در "
+            + "نظر می‌گیرد — فضای کافی برای تیغهٔ برش که از قبل در "
+            + "چیدمان لحاظ شده است.",
         },
       ],
     },

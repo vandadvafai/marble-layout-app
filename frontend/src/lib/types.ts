@@ -462,6 +462,9 @@ export interface InventoryUploadSummary {
   unmapped_columns: string[];
   warning_counts: Record<string, number>;
   preview: InventoryPreviewRow[];
+  /** Per-status calibration counts (M4). Optional so payloads cached
+   *  from before the calibration milestone still parse. */
+  calibration?: CalibrationCounts;
 }
 
 export interface InventoryUploadResponse {
@@ -470,6 +473,67 @@ export interface InventoryUploadResponse {
   excel_filename: string;
   image_count: number;
   summary: InventoryUploadSummary;
+}
+
+// ---------------------------------------------------------------------------
+// Slab calibration (M4 — Calibration UI & Workflow).
+//
+// Mirrors ``placement_engine.calibration.models.CalibrationRecord.to_dict()``
+// field-for-field. The backend is the single source of truth for the
+// usable-dimension math (20 mm/side, applied exactly once) — this type
+// only carries the numbers through, never re-derives them.
+// ---------------------------------------------------------------------------
+
+export type SourceType =
+  | "green_boundary" | "scanned_crop" | "raw_photo" | "no_photo";
+
+export type CalibrationStatus =
+  | "approved" | "needs_review" | "rejected" | "missing_photo";
+
+export interface CropRectangle {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface CalibrationRecord {
+  slab_id: string;
+  source_type: SourceType;
+  excel_width_mm: number;
+  excel_height_mm: number;
+  usable_width_mm: number;
+  usable_height_mm: number;
+  calibration_status: CalibrationStatus;
+  factory_policy_version: string;
+  original_image_path: string | null;
+  calibrated_image_path: string | null;
+  /** 4-length [x, y] pixel corners in original-image space, ordered
+   *  top-left, top-right, bottom-right, bottom-left. */
+  detected_corners: Point[] | null;
+  confirmed_corners: Point[] | null;
+  crop_coordinates: CropRectangle | null;
+  calibration_confidence: number | null;
+  aspect_delta: number | null;
+  approved_at: string | null;
+  approved_by: string | null;
+  warnings: string[];
+  notes: string | null;
+}
+
+export interface CalibrationCounts {
+  approved: number;
+  needs_review: number;
+  missing_photo: number;
+  rejected: number;
+}
+
+export interface CalibrationRecordsResponse {
+  active: boolean;
+  session_id?: string;
+  factory_policy_version?: string;
+  records: CalibrationRecord[];
+  counts: CalibrationCounts;
 }
 
 export interface InventoryCurrentResponse {

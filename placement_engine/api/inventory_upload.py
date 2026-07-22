@@ -1,230 +1,310 @@
-"""Process uploaded slab inventory (Excel + photos) into the
-canonical ``clean_slabs.json`` shape, and remember the active
-session in-memory so the matcher can use it.
+"""Persistent per-project storage for the Step-3 upload flow.
 
-Why this module exists
-----------------------
-Step 3 of the 4-step wizard needs a real upload path. The existing
-ingestion pipeline (``placement_engine.slab_intake.pipeline``) does
-all the heavy lifting — Excel parsing, dimension normalisation,
-serial-suffix photo matching — and writes the same
-``clean_slabs.json`` format the engine and the API already consume.
+The upload endpoint hands us the Excel + slab photos; this module:
 
-So this module is a THIN session layer:
+  1. Creates a fresh project directory under ``AVANDAD_DATA_DIR/projects/``.
+  2. Writes the raw files to disk.
+  3. Runs the slab-intake pipeline to normalise the Excel.
+  4. Runs the calibration pipeline (green boundary → scanned crop →
+     raw photo → no photo) on every slab.
+  5. Persists ``calibrations.json`` + ``clean_slabs.json``.
+  6. Registers the project as the "active" one.
 
-  * write the uploaded files to a tempdir,
-  * call ``ingest_slab_export(...)`` + ``write_outputs(...)``,
-  * stash the tempdir path in module state so the inventory resolver
-    can prefer it over the demo / real defaults,
-  * surface a summary the frontend can render directly.
-
-Single-user / single-session is fine for V1 — only one upload at a
-time can be "active". Replacing the upload cleans up the previous
-tempdir. No persistence across server restarts.
-
-The matcher consumes the uploaded inventory transparently:
-``resolve_inventory_source`` (next door) now checks
-``get_active_upload()`` BEFORE the env / real / demo defaults.
+Restart survival: on process start, ``rehydrate_active_upload()``
+walks ``AVANDAD_DATA_DIR/projects/`` and picks the most-recently
+modified project directory. Records are re-read from
+``calibrations.json`` so an operator restarting the backend keeps
+their approved slabs.
 """
 
 from __future__ import annotations
 
 import shutil
-import tempfile
-import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from placement_engine.image_intake.processor import (
-    ImageMetadata, process_inventory, write_outputs as write_image_outputs,
+from placement_engine.api.app_paths import ensure_dirs, resolve_app_paths
+from placement_engine.calibration import (
+    CalibrationRecord,
+    CalibrationStatus,
+    FACTORY_POLICY_VERSION,
+    SlabCalibrationInput,
+    SlabCorners,
+    SourceType,
+    apply_manual_corners,
+    calibrate_batch,
+    calibrate_slab,
+    count_by_status,
+    migrate_legacy_green_box_records,
+)
+from placement_engine.calibration.storage import (
+    ProjectPaths,
+    load_meta,
+    load_records,
+    most_recent_project,
+    new_project,
+    save_meta,
+    save_records,
+    save_standardized_inventory,
 )
 from placement_engine.slab_intake.pipeline import (
-    SlabIngestionResult, ingest_slab_export, write_outputs,
+    SlabIngestionResult, SlabRecord,
+    ingest_slab_export,
 )
 
 
-@dataclass(frozen=True)
+@dataclass
 class UploadSession:
-    """One uploaded inventory session.
+    """One uploaded inventory session (project).
 
-    ``clean_slabs_path`` points at the JSON the inventory loader will
-    read — the rest of the API only needs that. The other fields are
-    for the GET /api/inventory/current endpoint + cleanup.
-
-    ``image_metadata_by_slab`` keys slab_id → per-image record from the
-    green-box crop pass (``placement_engine.image_intake.processor``).
-    The matcher endpoint can consult this without re-reading the
-    on-disk image_metadata.json. Records may have
-    ``green_box_detected=False`` when detection fell back; the
-    slab-image endpoint then serves the original photo + flags the
-    fallback.
+    ``clean_slabs_path`` is the standardized inventory the API
+    matcher / DXF writer / client PNG all consume. It contains ONLY
+    approved slabs — Layout Helper never sees unreviewed rows.
     """
 
     session_id: str
     uploaded_at: str
     excel_filename: str
     image_count: int
-    temp_dir: Path
+    project_paths: ProjectPaths
     clean_slabs_path: Path
     summary: dict[str, Any]
-    image_metadata_by_slab: dict[str, ImageMetadata]
+    calibration_records: list[CalibrationRecord]
 
 
 # Module-level slot for the active session. V1 supports one uploaded
-# inventory at a time across all clients; the spec allows
-# session/local temporary storage, so a global ref is enough.
+# inventory at a time; the on-disk project directory is the durable
+# store, this variable is a hot cache.
 _ACTIVE_UPLOAD: UploadSession | None = None
 
 
 def get_active_upload() -> UploadSession | None:
-    """Return the currently-active uploaded inventory, or None when
-    no upload has happened (the resolver then falls back to the demo /
-    real inventories on disk)."""
+    """Return the currently-active uploaded inventory.
+
+    On the very first call after a fresh boot, tries to rehydrate
+    from the most recent project directory on disk so restarts
+    don't erase the operator's approvals.
+    """
+    global _ACTIVE_UPLOAD
+    if _ACTIVE_UPLOAD is not None:
+        return _ACTIVE_UPLOAD
+    _ACTIVE_UPLOAD = _rehydrate_from_disk()
     return _ACTIVE_UPLOAD
 
 
 def clear_active_upload() -> None:
-    """Drop the active upload and clean its tempdir. Idempotent."""
+    """Drop the active upload and delete its project directory.
+    Called by the frontend's "Start new project" action so no stale
+    slab files linger between projects."""
     global _ACTIVE_UPLOAD
-    if _ACTIVE_UPLOAD is None:
-        return
-    try:
-        shutil.rmtree(_ACTIVE_UPLOAD.temp_dir, ignore_errors=True)
-    finally:
-        _ACTIVE_UPLOAD = None
+    session = _ACTIVE_UPLOAD
+    _ACTIVE_UPLOAD = None
+    if session is not None and session.project_paths.root.exists():
+        shutil.rmtree(session.project_paths.root, ignore_errors=True)
+
+
+def _rehydrate_from_disk() -> UploadSession | None:
+    paths = resolve_app_paths()
+    ensure_dirs(paths)
+    projects_root = paths.root / "projects"
+    latest = most_recent_project(projects_root)
+    if latest is None:
+        return None
+    records = load_records(latest)
+    if not records:
+        return None
+    meta = load_meta(latest)
+    raw_slab_ids = {
+        r.slab_id for r in records if r.source_type == SourceType.RAW_PHOTO
+    }
+    migrate_legacy_green_box_records(latest.root, records)
+    if any(
+        r.slab_id in raw_slab_ids and r.source_type == SourceType.GREEN_BOUNDARY
+        for r in records
+    ):
+        save_records(latest, records)
+        save_standardized_inventory(
+            latest, records,
+            source_meta={
+                "excel_filename": meta.get("excel_filename") or "",
+                "source_type": "step3_upload",
+            },
+        )
+    summary = meta.get("summary") or _summary_from_records(records)
+    return UploadSession(
+        session_id=latest.session_id,
+        uploaded_at=meta.get("uploaded_at") or "",
+        excel_filename=meta.get("excel_filename") or "",
+        image_count=meta.get("image_count") or 0,
+        project_paths=latest,
+        clean_slabs_path=latest.clean_slabs_file,
+        summary=summary,
+        calibration_records=records,
+    )
+
+
+def _summary_from_records(
+    records: list[CalibrationRecord],
+) -> dict[str, Any]:
+    counts = count_by_status(records)
+    return {
+        "total_rows": len(records),
+        "valid_slabs": counts["approved"],
+        "invalid_slabs": counts["rejected"] + counts["missing_photo"],
+        "linked_photos": sum(1 for r in records if r.original_image_path),
+        "unmatched_photos": [],
+        "slabs_without_photos": [
+            r.slab_id for r in records if r.original_image_path is None
+        ],
+        "mapped_columns": {},
+        "unmapped_columns": [],
+        "warning_counts": {},
+        "preview": [],
+        "calibration": counts,
+    }
 
 
 def process_upload(
     excel_bytes: bytes, excel_filename: str,
     images: list[tuple[str, bytes]],
 ) -> UploadSession:
-    """Persist the uploaded files to a tempdir, run the slab-intake
-    pipeline, and install the result as the active session.
+    """Persist a fresh project on disk and run the calibration pipeline.
 
-    Replaces any previous active upload — the previous tempdir is
-    deleted so memory doesn't grow without bound across uploads.
-
-    ``images`` is a list of ``(filename, bytes)`` pairs. The
-    pipeline's photo matcher reads the FILENAME, not the bytes,
-    when linking photos to slab records, so the original filenames
-    are preserved exactly on disk.
+    The previous active project is deleted first so operators
+    don't accidentally mix slabs between two Excel exports.
     """
-    # Tempdir layout: <root>/excel/<original>.xlsx + <root>/images/*
-    # Mirrors how the real project ships these files (see
-    # data/raw_test/ in the repo).
-    root = Path(tempfile.mkdtemp(prefix="stonelayout_upload_"))
-    excel_dir = root / "excel"
-    excel_dir.mkdir()
-    image_dir = root / "images"
-    image_dir.mkdir()
+    # Reset any prior state before writing new files.
+    clear_active_upload()
 
-    excel_path = excel_dir / excel_filename
+    paths = resolve_app_paths()
+    ensure_dirs(paths)
+    projects_root = paths.root / "projects"
+    projects_root.mkdir(parents=True, exist_ok=True)
+    project = new_project(projects_root)
+
+    excel_path = project.excel / _safe_filename(excel_filename, "inventory.xlsx")
     excel_path.write_bytes(excel_bytes)
 
     written_images: list[Path] = []
     for original_name, payload in images:
-        # Sanitise minimally — strip directory components so a
-        # malicious uploader can't write outside the tempdir. The
-        # filename's stem is what the matcher reads, so we keep it
-        # intact otherwise.
-        safe_name = Path(original_name).name
-        dest = image_dir / safe_name
+        safe_name = _safe_filename(Path(original_name).name, "photo.jpg")
+        dest = project.original_images / safe_name
         dest.write_bytes(payload)
         written_images.append(dest)
 
     try:
         result = ingest_slab_export(
-            excel_path=excel_path, image_dir=image_dir, sheet_name=None,
+            excel_path=excel_path, image_dir=project.original_images,
+            sheet_name=None,
         )
-        # write_outputs produces clean_slabs.json in the canonical
-        # format the inventory loader already understands. We store
-        # it at the root of the tempdir.
-        out_paths = write_outputs(result, root)
     except Exception:
-        # Pipeline failed (Excel unreadable, no recognised columns,
-        # etc.) — clean up the tempdir before re-raising so we don't
-        # leak.
-        shutil.rmtree(root, ignore_errors=True)
+        # Something in the Excel parse failed — clean up the empty
+        # project directory before re-raising so we don't leak.
+        shutil.rmtree(project.root, ignore_errors=True)
         raise
 
-    # 0.1.47 — also run the green-box crop pass. This produces
-    # processed images (the usable rectangle inside each slab photo)
-    # + image_metadata.json with crop_x/y/width/height. Failures here
-    # are NON-FATAL: if cv2 misbehaves or detection finds no green
-    # rectangle, individual records fall back to ``green_box_detected
-    # = False`` and the slab-image endpoint serves the original. The
-    # upload as a whole still succeeds.
-    image_metadata_by_slab: dict[str, ImageMetadata] = {}
-    try:
-        image_result = process_inventory(out_paths["json"], root)
-        write_image_outputs(image_result)
-        for meta in image_result.images:
-            image_metadata_by_slab[meta.slab_id] = meta
-    except Exception:
-        # Defensive: never let the crop pass break the upload. The
-        # session still serves originals through the regular
-        # slab-image endpoint.
-        image_metadata_by_slab = {}
+    calibration_inputs = _inputs_from_slab_records(result.records)
+    calibration_records = calibrate_batch(
+        calibration_inputs, project.calibrated_images,
+    )
+
+    save_records(project, calibration_records)
+    save_standardized_inventory(
+        project, calibration_records,
+        source_meta={
+            "excel_filename": excel_filename,
+            "source_type": "step3_upload",
+        },
+    )
 
     summary = _build_summary(
-        result, image_dir, written_images, image_metadata_by_slab,
+        result, project.original_images, written_images,
+        calibration_records,
     )
+    meta = {
+        "session_id": project.session_id,
+        "uploaded_at": datetime.now(timezone.utc).isoformat(),
+        "excel_filename": excel_filename,
+        "image_count": len(written_images),
+        "factory_policy_version": FACTORY_POLICY_VERSION,
+        "summary": summary,
+    }
+    save_meta(project, meta)
 
     session = UploadSession(
-        session_id=str(uuid.uuid4()),
-        uploaded_at=datetime.utcnow().isoformat() + "Z",
+        session_id=project.session_id,
+        uploaded_at=meta["uploaded_at"],
         excel_filename=excel_filename,
         image_count=len(written_images),
-        temp_dir=root,
-        clean_slabs_path=out_paths["json"],
+        project_paths=project,
+        clean_slabs_path=project.clean_slabs_file,
         summary=summary,
-        image_metadata_by_slab=image_metadata_by_slab,
+        calibration_records=calibration_records,
     )
 
-    # Swap in the new session — replaces (and cleans up) the previous
-    # active upload if any.
     global _ACTIVE_UPLOAD
-    previous = _ACTIVE_UPLOAD
     _ACTIVE_UPLOAD = session
-    if previous is not None:
-        shutil.rmtree(previous.temp_dir, ignore_errors=True)
-
     return session
+
+
+def _safe_filename(raw: str, fallback: str) -> str:
+    """Strip directory components + any characters that might be
+    interpreted by the shell. Deliberately conservative — the
+    original stem still needs to survive so the photo matcher can
+    key off it."""
+    name = Path(raw).name.strip()
+    if not name:
+        return fallback
+    if name.startswith("."):
+        name = "_" + name
+    return name
+
+
+def _inputs_from_slab_records(
+    records: list[SlabRecord],
+) -> list[SlabCalibrationInput]:
+    """Adapt the slab-intake pipeline's ``SlabRecord`` to the
+    calibration pipeline's input tuple. Both live in the API
+    process so we can afford one pass over the list."""
+    out: list[SlabCalibrationInput] = []
+    for rec in records:
+        # Use whichever slab id survives the pipeline's fallbacks;
+        # every SlabRecord has one after normalisation.
+        slab_id = rec.slab_id or rec.serial_number or rec.item_code or ""
+        if not slab_id:
+            continue
+        original = Path(rec.image_path) if rec.image_path else None
+        if original is not None and not original.exists():
+            original = None
+        out.append(SlabCalibrationInput(
+            slab_id=str(slab_id),
+            excel_width_mm=float(rec.width_mm or 0.0),
+            excel_height_mm=float(rec.height_mm or 0.0),
+            original_image_path=original,
+        ))
+    return out
 
 
 def _build_summary(
     result: SlabIngestionResult,
     image_dir: Path,
     written_images: list[Path],
-    image_metadata_by_slab: dict[str, ImageMetadata] | None = None,
+    calibration_records: list[CalibrationRecord],
 ) -> dict[str, Any]:
     """Frontend-facing summary of the upload outcome.
 
-    Counts:
-      * total_rows     — Excel rows the pipeline saw
-      * valid_slabs    — rows with positive width AND height
-      * invalid_slabs  — rows missing or malformed dimensions
-      * linked_photos  — slab records with image_found=True
-      * unmatched_photos — files in the upload that the matcher
-        couldn't link to any slab (extra photos)
-      * slabs_without_photos — slab records with no linked photo
-
-    Also returns a small preview (first 10 normalised records) so
-    the Step 3 panel can show a table without a second request.
+    Same top-level shape as before so the existing Step-3 panel
+    continues to render, plus a ``calibration`` block with per-
+    status counts.
     """
     records = result.records
-    valid = [r for r in records if r.width_mm and r.height_mm]
     linked = [r for r in records if r.image_found]
     missing_photo = [r for r in records if not r.image_found]
 
-    # Unmatched photos = files on disk whose stem isn't referenced
-    # by any record's image_path. We compare via Path resolution
-    # because the pipeline records absolute paths.
     matched_paths = {
-        Path(r.image_path).resolve() for r in records
-        if r.image_path
+        Path(r.image_path).resolve() for r in records if r.image_path
     }
     on_disk = {p.resolve() for p in written_images}
     unmatched = sorted(p.name for p in on_disk - matched_paths)
@@ -248,33 +328,133 @@ def _build_summary(
         for r in records[:10]
     ]
 
-    # 0.1.47 — surface the green-box crop outcome to the UI so the
-    # Step-3 panel can show "N safe crops detected" and the Step-4
-    # properties card can warn when a fallback to the full image
-    # happened. Numbers default to None when the crop pass didn't
-    # run (e.g. cv2 missing), so the panel can render gracefully.
-    safe_crops_detected: int | None = None
-    safe_crops_missing: int | None = None
-    if image_metadata_by_slab is not None:
-        safe_crops_detected = sum(
-            1 for m in image_metadata_by_slab.values() if m.green_box_detected
-        )
-        safe_crops_missing = sum(
-            1 for m in image_metadata_by_slab.values()
-            if not m.green_box_detected and m.original_image_path
-        )
+    counts = count_by_status(calibration_records)
 
     return {
         "total_rows": len(records),
-        "valid_slabs": len(valid),
-        "invalid_slabs": len(records) - len(valid),
+        "valid_slabs": counts["approved"],
+        "invalid_slabs": len(records) - counts["approved"],
         "linked_photos": len(linked),
         "unmatched_photos": unmatched,
-        "slabs_without_photos": [r.slab_id for r in missing_photo if r.slab_id],
+        "slabs_without_photos": [
+            r.slab_id for r in missing_photo if r.slab_id
+        ],
         "mapped_columns": result.mapped_columns,
         "unmapped_columns": result.unmapped_columns,
         "warning_counts": result.warning_counts(),
         "preview": preview,
-        "safe_crops_detected": safe_crops_detected,
-        "safe_crops_missing": safe_crops_missing,
+        # Calibration counts drive the new Step-3 status buckets.
+        "calibration": counts,
     }
+
+
+# ---------------------------------------------------------------------------
+# Calibration mutations — invoked by the API endpoints in routes.py
+# ---------------------------------------------------------------------------
+
+
+def update_manual_corners(
+    slab_id: str, corners: SlabCorners,
+) -> CalibrationRecord:
+    """Apply operator-confirmed corners for one slab and persist."""
+    session = get_active_upload()
+    if session is None:
+        raise LookupError("no active upload")
+    for i, rec in enumerate(session.calibration_records):
+        if rec.slab_id == slab_id:
+            updated = apply_manual_corners(
+                rec, corners, session.project_paths.calibrated_images,
+            )
+            session.calibration_records[i] = updated
+            _persist_current_session(session)
+            return updated
+    raise LookupError(f"slab {slab_id!r} not in active upload")
+
+
+def set_calibration_status(
+    slab_id: str, status: CalibrationStatus,
+) -> CalibrationRecord:
+    """Force a calibration record into ``approved`` / ``rejected``.
+
+    Used by the review UI's Approve / Reject buttons when the
+    detected corners were already correct."""
+    session = get_active_upload()
+    if session is None:
+        raise LookupError("no active upload")
+    for i, rec in enumerate(session.calibration_records):
+        if rec.slab_id == slab_id:
+            rec.calibration_status = status
+            if status == CalibrationStatus.APPROVED:
+                rec.approved_at = datetime.now(timezone.utc).isoformat()
+                rec.approved_by = "anonymous"
+                # If the operator hit Approve without touching the
+                # corners, adopt the detected corners as confirmed.
+                if rec.confirmed_corners is None and rec.detected_corners is not None:
+                    rec.confirmed_corners = rec.detected_corners
+            else:
+                rec.approved_at = None
+                rec.approved_by = None
+            session.calibration_records[i] = rec
+            _persist_current_session(session)
+            return rec
+    raise LookupError(f"slab {slab_id!r} not in active upload")
+
+
+def replace_slab_image(
+    slab_id: str, filename: str, image_bytes: bytes,
+) -> CalibrationRecord:
+    """Swap a slab's source photo and re-run calibration from scratch.
+
+    Used by the manual-review modal's "Replace image" action — the
+    operator's new photo goes through the exact same classifier
+    (green boundary → scanned crop → raw photo) every other slab
+    does, so a replaced photo is judged by the same rules as one
+    uploaded the normal way."""
+    session = get_active_upload()
+    if session is None:
+        raise LookupError("no active upload")
+    for i, rec in enumerate(session.calibration_records):
+        if rec.slab_id == slab_id:
+            safe_name = _safe_filename(filename, f"{slab_id}.jpg")
+            dest = session.project_paths.original_images / safe_name
+            dest.write_bytes(image_bytes)
+            new_input = SlabCalibrationInput(
+                slab_id=rec.slab_id,
+                excel_width_mm=rec.excel_width_mm,
+                excel_height_mm=rec.excel_height_mm,
+                original_image_path=dest,
+            )
+            updated = calibrate_slab(
+                new_input, session.project_paths.calibrated_images,
+            )
+            session.calibration_records[i] = updated
+            _persist_current_session(session)
+            return updated
+    raise LookupError(f"slab {slab_id!r} not in active upload")
+
+
+def _persist_current_session(session: UploadSession) -> None:
+    save_records(session.project_paths, session.calibration_records)
+    save_standardized_inventory(
+        session.project_paths, session.calibration_records,
+        source_meta={
+            "excel_filename": session.excel_filename,
+            "source_type": "step3_upload",
+        },
+    )
+    # Refresh the summary + meta so subsequent GETs report new counts.
+    session.summary["calibration"] = count_by_status(session.calibration_records)
+    save_meta(session.project_paths, {
+        "session_id": session.session_id,
+        "uploaded_at": session.uploaded_at,
+        "excel_filename": session.excel_filename,
+        "image_count": session.image_count,
+        "factory_policy_version": FACTORY_POLICY_VERSION,
+        "summary": session.summary,
+    })
+
+
+def calibration_records_dict(session: UploadSession) -> list[dict[str, Any]]:
+    """Serialise every record for the ``/api/calibration/records``
+    endpoint. Keeps the endpoint definition in ``routes.py`` thin."""
+    return [r.to_dict() for r in session.calibration_records]

@@ -35,9 +35,9 @@ import HelpModal from "./components/HelpModal";
 import StepperHeader from "./components/StepperHeader";
 import ValidationSummary from "./components/ValidationSummary";
 import {
-  clearUploadedInventory, fetchCurrentInventory, fetchDemoLayout,
-  fetchInventoryInfo, listDemos, postMatchInventory, postValidateLayout,
-  regenerateLayout,
+  clearUploadedInventory, fetchCalibrationRecords, fetchCurrentInventory,
+  fetchDemoLayout, fetchInventoryInfo, listDemos, postMatchInventory,
+  postValidateLayout, regenerateLayout,
 } from "./lib/api";
 import {
   applySeamMove, rebuildAllRectanglePolygons, resolveTargetPosition,
@@ -71,12 +71,12 @@ import {
   clearSavedState, loadSavedState, saveState,
 } from "./lib/storage";
 import type {
-  Assignments, Column, DemoIndexEntry, DemoLayoutResponse, Doorway,
-  EditorMode, FinalizationState, GuideLine, InventoryInfo,
-  InventoryMatchResponse, InventoryUploadSummary, Piece, Plan, Point,
-  Selection, ValidationResult, WorkflowStep,
+  Assignments, CalibrationRecordsResponse, Column, DemoIndexEntry,
+  DemoLayoutResponse, Doorway, EditorMode, FinalizationState, GuideLine,
+  InventoryInfo, InventoryMatchResponse, InventoryUploadSummary, Piece,
+  Plan, Point, Selection, ValidationResult, WorkflowStep,
 } from "./lib/types";
-import { gateForStep } from "./lib/workflow";
+import { gateForStep, isInventoryReady } from "./lib/workflow";
 
 const INITIAL_DEMO = "l_shape";
 const VALIDATION_DEBOUNCE_MS = 200;
@@ -144,6 +144,23 @@ export default function App() {
   const [uploadSummary, setUploadSummary] = useState<InventoryUploadSummary | null>(null);
   const [uploadExcelName, setUploadExcelName] = useState<string | null>(null);
   const [uploadImageCount, setUploadImageCount] = useState<number>(0);
+
+  // Calibration records for the active upload (M4). ``null`` means
+  // "not fetched yet / no active upload" — the panel and the Step-4
+  // gate both treat that the same as "calibration.active === false".
+  // Re-fetched on boot (so a refresh/reopen reflects durable backend
+  // state — no localStorage caching of calibration, the backend is
+  // the only source of truth) and after every upload/approve/reject/
+  // corner-edit/replace-image mutation.
+  const [calibration, setCalibration] = useState<CalibrationRecordsResponse | null>(null);
+  const refreshCalibration = useCallback(() => {
+    fetchCalibrationRecords()
+      .then((res) => setCalibration(res))
+      .catch(() => {
+        // Non-critical — the panel just shows nothing until the
+        // next successful fetch.
+      });
+  }, []);
 
   // 0.1.44 — current working slab size + how it was chosen.
   // Populated when the user clicks "Generate layout from inventory
@@ -291,6 +308,11 @@ export default function App() {
       })
       .catch(() => {
         // Non-critical — the fallback inventory is fine.
+      });
+    fetchCalibrationRecords()
+      .then((res) => { if (!cancelled) setCalibration(res); })
+      .catch(() => {
+        // Non-critical — same fallback as above.
       });
     return () => { cancelled = true; };
   }, []);
@@ -959,9 +981,15 @@ export default function App() {
   // this — exporting a factory cut plan from sample data would be a
   // production footgun. Surfaced via gateForStep so the Step-4 chip
   // and the in-panel "Continue" button stay consistent.
+  //
+  // M4: for a calibration-tracked upload, "ready" additionally means
+  // every slab is resolved (approved or rejected) — see
+  // ``isInventoryReady`` in workflow.ts, the single place this rule
+  // is defined so the stepper gate and the Step-3 checkmark below
+  // can't drift apart.
   const inventoryReady = useMemo(
-    () => uploadSummary !== null && uploadSummary.valid_slabs > 0,
-    [uploadSummary],
+    () => isInventoryReady(calibration, inventoryInfo),
+    [calibration, inventoryInfo],
   );
   const gateInputs = useMemo(() => ({
     layout: data?.layout ?? null,
@@ -1067,10 +1095,11 @@ export default function App() {
   // Step 3 specifically: the previous predicate was
   // ``finalization !== null`` which conflates it with Step 2. The
   // correct check is "is a usable inventory active" — uploaded
-  // session OR the fallback inventory's valid_count > 0.
+  // session OR the fallback inventory's valid_count > 0. M4: reuses
+  // the exact same ``isInventoryReady`` the Step-4 gate uses so the
+  // checkmark and the gate can never disagree.
   const completedSteps = useMemo(() => {
-    const inventoryReady =
-      inventoryInfo !== null && inventoryInfo.valid_count > 0;
+    const inventoryReady = isInventoryReady(calibration, inventoryInfo);
     const allAssigned =
       assignmentSummary.total > 0
       && assignmentSummary.assigned === assignmentSummary.total;
@@ -1080,7 +1109,7 @@ export default function App() {
       3: currentStep > 3 && inventoryReady,
       4: currentStep === 4 && allAssigned,
     } as const;
-  }, [currentStep, data, inventoryInfo, assignmentSummary]);
+  }, [currentStep, data, calibration, inventoryInfo, assignmentSummary]);
 
   // When the designer enters Step 4 (or finalizes a fresh layout),
   // kick off a match against the FINAL pieces so the candidate list
@@ -1470,7 +1499,10 @@ export default function App() {
             setUploadSummary(s);
             setUploadExcelName(name);
             setUploadImageCount(count);
+            refreshCalibration();
           }}
+          calibration={calibration}
+          onCalibrationChange={setCalibration}
           onContinue={() => requestStepChange(4)}
           canContinue={gates[4].reached}
         />

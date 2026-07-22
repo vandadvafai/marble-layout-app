@@ -8,7 +8,8 @@
 // by tests.
 
 import type {
-  FinalizationState, Layout, WorkflowStep,
+  CalibrationCounts, CalibrationRecord, CalibrationRecordsResponse,
+  FinalizationState, InventoryInfo, Layout, WorkflowStep,
 } from "./types";
 
 
@@ -64,8 +65,85 @@ export interface GateInputs {
    *  that parsed, validated, and produced at least one usable slab.
    *  The fallback (demo / real-export) inventory does NOT satisfy
    *  this — Step 4 explicitly requires the designer's own upload to
-   *  avoid factory cut plans being produced from sample data. */
+   *  avoid factory cut plans being produced from sample data.
+   *
+   *  For a calibration-tracked upload this ALSO means every slab is
+   *  resolved (approved or rejected — see ``isInventoryReady``); a
+   *  ``needs_review`` or ``missing_photo`` record blocks Step 4 just
+   *  as much as an empty inventory would. */
   inventoryReady: boolean;
+}
+
+/** Per-status calibration counts, computed straight from the record
+ *  list — never trust a separately-cached count alongside the
+ *  records themselves, that's a second source of truth waiting to
+ *  drift out of sync. */
+export function calibrationCounts(
+  records: CalibrationRecord[],
+): CalibrationCounts {
+  const counts: CalibrationCounts = {
+    approved: 0, needs_review: 0, missing_photo: 0, rejected: 0,
+  };
+  for (const r of records) counts[r.calibration_status] += 1;
+  return counts;
+}
+
+/** Single source of truth for "is the Step-3 inventory ready for
+ *  Step 4", shared by the stepper gate and the Step-3 completion
+ *  checkmark so the two can never disagree.
+ *
+ *  Calibration-tracked (uploaded) inventory: every slab must be
+ *  resolved to APPROVED or REJECTED — a NEEDS_REVIEW or
+ *  MISSING_PHOTO record blocks Step 4 outright — AND at least one
+ *  slab must be approved (a project where every slab was rejected
+ *  has nothing to assign).
+ *
+ *  Demo / env-override inventory (``calibration.active`` is false —
+ *  it never went through the Step-3 upload endpoint, so there's no
+ *  calibration concept to gate on): falls back to the pre-M4 check,
+ *  at least one valid record. */
+export function isInventoryReady(
+  calibration: CalibrationRecordsResponse | null,
+  inventoryInfo: InventoryInfo | null,
+): boolean {
+  if (calibration && calibration.active) {
+    const c = calibration.counts;
+    return c.approved > 0 && c.needs_review === 0 && c.missing_photo === 0;
+  }
+  return inventoryInfo !== null && inventoryInfo.valid_count > 0;
+}
+
+/** Slab counts + the no-photo list for the Step-3 "Inventory
+ *  summary" card. Same rule as ``isInventoryReady``: once a
+ *  calibration-tracked upload is active, these numbers must come
+ *  from the LIVE calibration records, not the frozen ``/upload``
+ *  response — otherwise the summary card can silently disagree with
+ *  the Calibration panel and the Step-4 gate sitting right beneath
+ *  it (e.g. after an approve/reject/replace-image action that
+ *  happened after the initial upload). */
+export function inventorySummaryDisplay(
+  calibration: CalibrationRecordsResponse | null,
+  summary: {
+    valid_slabs: number;
+    invalid_slabs: number;
+    slabs_without_photos: string[];
+  } | null,
+): { validSlabs: number; invalidSlabs: number; slabsWithoutPhotos: string[] } {
+  if (calibration && calibration.active) {
+    const c = calibration.counts;
+    return {
+      validSlabs: c.approved,
+      invalidSlabs: c.rejected + c.needs_review + c.missing_photo,
+      slabsWithoutPhotos: calibration.records
+        .filter((r) => r.calibration_status === "missing_photo")
+        .map((r) => r.slab_id),
+    };
+  }
+  return {
+    validSlabs: summary?.valid_slabs ?? 0,
+    invalidSlabs: summary?.invalid_slabs ?? 0,
+    slabsWithoutPhotos: summary?.slabs_without_photos ?? [],
+  };
 }
 
 /** Single source of truth for the Step-4 lock message. Surfaced as
