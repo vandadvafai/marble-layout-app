@@ -431,3 +431,50 @@ def test_count_by_status_empty_list_is_all_zero():
     assert count_by_status([]) == {
         "approved": 0, "needs_review": 0, "missing_photo": 0, "rejected": 0,
     }
+
+
+def test_calibrated_image_removes_the_20mm_border(tmp_path):
+    """Regression: the calibrated usable image must be the INNER
+    region after the 20 mm/side deduction — not the full slab scaled
+    down. Build a green-boundary slab whose outer 20 mm band is red
+    and inner region blue; after calibration the image edges must be
+    blue (inner), proving the border was cropped, not merely scaled.
+    """
+    import numpy as np
+    import cv2
+    from placement_engine.calibration.pipeline import (
+        calibrate_slab, SlabCalibrationInput,
+    )
+
+    ppm = 2
+    w_mm, h_mm = 200, 160          # usable 160 x 120
+    sw, sh = w_mm * ppm, h_mm * ppm
+    pad = 40
+    img = np.full((sh + 2 * pad, sw + 2 * pad, 3), 255, np.uint8)
+    x0, y0 = pad, pad
+    img[y0:y0 + sh, x0:x0 + sw] = (0, 0, 255)           # full slab: red band
+    inset = 20 * ppm
+    img[y0 + inset:y0 + sh - inset, x0 + inset:x0 + sw - inset] = (255, 0, 0)  # blue inner
+    cv2.rectangle(img, (x0 - 1, y0 - 1), (x0 + sw, y0 + sh), (0, 255, 0), 6)
+
+    src = tmp_path / "slab.png"
+    cv2.imwrite(str(src), img)
+    rec = calibrate_slab(
+        SlabCalibrationInput("BORDER-1", w_mm, h_mm, src), tmp_path / "cal",
+    )
+    out = cv2.imread(rec.calibrated_image_path)
+    # Output is the usable raster size (unchanged contract).
+    assert (out.shape[1], out.shape[0]) == (
+        int(rec.usable_width_mm), int(rec.usable_height_mm),
+    )
+    h, w = out.shape[:2]
+    # Sample a small ring just inside every edge (5 px in, past any
+    # interpolation fringe). All must be blue (inner), none red/green.
+    def is_blue(px):
+        b, g, r = int(px[0]), int(px[1]), int(px[2])
+        return b > 150 and r < 100 and g < 120
+    ring = [
+        out[5, w // 2], out[h - 6, w // 2],
+        out[h // 2, 5], out[h // 2, w - 6],
+    ]
+    assert all(is_blue(px) for px in ring), [tuple(int(c) for c in p) for p in ring]

@@ -40,6 +40,7 @@ from placement_engine.calibration.models import (
 )
 from placement_engine.calibration.policy import (
     DEFAULT_APPROVED_BY,
+    EDGE_DEDUCTION_MM,
     FACTORY_POLICY_VERSION,
     MIN_AUTO_APPROVE_CONFIDENCE,
     classify_aspect_agreement,
@@ -82,6 +83,64 @@ def _target_pixels(usable_w_mm: float, usable_h_mm: float) -> tuple[int, int]:
     tw = max(64, int(round(usable_w_mm * CALIBRATED_PIXELS_PER_MM)))
     th = max(64, int(round(usable_h_mm * CALIBRATED_PIXELS_PER_MM)))
     return tw, th
+
+
+def _rectify_and_trim(
+    image,
+    corners: SlabCorners,
+    excel_w: float, excel_h: float,
+    usable_w: float, usable_h: float,
+):
+    """Rectify the detected slab quad to the calibrated usable raster,
+    following the confirmed factory workflow in ONE place:
+
+        1. perspective-warp the quad (which spans the FULL physical
+           slab) to an Excel-sized raster — "map the boundary exactly
+           to the Excel width and height";
+        2. remove the ``EDGE_DEDUCTION_MM`` border from every side —
+           "deduct 20 mm from every side";
+        3. the surviving inner rectangle IS the usable slab.
+
+    Both the numeric usable dimensions (``usable_dimensions_mm``) and
+    this image crop derive the 20 mm from the SAME
+    ``EDGE_DEDUCTION_MM`` policy constant, so there is exactly one
+    edge-deduction source of truth. Warping straight to the usable
+    size (the previous behaviour) would keep the outer 20 mm border
+    baked into the image and put the pixels at ``usable/excel`` px per
+    mm instead of the intended 1:1 — this restores both.
+
+    The output is exactly ``_target_pixels(usable_w, usable_h)`` so
+    downstream consumers (and the existing tests) see the usable
+    raster size they already expect.
+    """
+    out_w, out_h = _target_pixels(usable_w, usable_h)
+    # Pixels-per-mm implied by the (possibly min-clamped) output size.
+    # Using the usable target keeps this consistent with tiny test
+    # fixtures where the clamp is active.
+    ppm_w = out_w / usable_w if usable_w > 0 else CALIBRATED_PIXELS_PER_MM
+    ppm_h = out_h / usable_h if usable_h > 0 else CALIBRATED_PIXELS_PER_MM
+    excel_w_px = max(out_w + 2, int(round(excel_w * ppm_w)))
+    excel_h_px = max(out_h + 2, int(round(excel_h * ppm_h)))
+    inset_w = int(round(EDGE_DEDUCTION_MM * ppm_w))
+    inset_h = int(round(EDGE_DEDUCTION_MM * ppm_h))
+
+    rectified = corner_utils.rectify_to_dims(
+        image, corners, excel_w_px, excel_h_px,
+    )
+    # Crop the border band off every side → the inner usable region.
+    inner = rectified[
+        inset_h:excel_h_px - inset_h,
+        inset_w:excel_w_px - inset_w,
+    ]
+    if inner.shape[0] < 1 or inner.shape[1] < 1:
+        # Degenerate crop (shouldn't happen once usable_* > 0); fall
+        # back to the full rectified raster rather than an empty image.
+        inner = rectified
+    # Normalise to the exact usable target size so rounding in the
+    # inset never changes the stored raster's dimensions.
+    if (inner.shape[1], inner.shape[0]) != (out_w, out_h):
+        inner = cv2.resize(inner, (out_w, out_h), interpolation=cv2.INTER_LINEAR)
+    return inner
 
 
 def _orient_corners_for_excel(
@@ -208,7 +267,6 @@ def calibrate_slab(
         )
 
     excel_aspect = corner_utils.image_aspect_from_bbox(excel_w, excel_h)
-    target_w_px, target_h_px = _target_pixels(usable_w, usable_h)
 
     # 1. Try the factory green boundary first — cheapest signal.
     green = detect_green_box(image)
@@ -222,8 +280,8 @@ def calibrate_slab(
         oriented, _swapped = _orient_corners_for_excel(
             detected_corners, detected_aspect, excel_aspect,
         )
-        rectified = corner_utils.rectify_to_dims(
-            image, oriented, target_w_px, target_h_px,
+        rectified = _rectify_and_trim(
+            image, oriented, excel_w, excel_h, usable_w, usable_h,
         )
         return _finalise(
             slab=slab,
@@ -263,8 +321,8 @@ def calibrate_slab(
     oriented, _swapped = _orient_corners_for_excel(
         detection.corners, detected_aspect, excel_aspect,
     )
-    rectified = corner_utils.rectify_to_dims(
-        image, oriented, target_w_px, target_h_px,
+    rectified = _rectify_and_trim(
+        image, oriented, excel_w, excel_h, usable_w, usable_h,
     )
     # A very high coverage (~1.0) usually means the operator pre-
     # cropped the image so the slab fills the frame. Tag those
@@ -456,8 +514,11 @@ def apply_manual_corners(
         record.warnings = list(record.warnings) + ["image_unreadable"]
         record.calibration_status = CalibrationStatus.REJECTED
         return record
-    tw, th = _target_pixels(record.usable_width_mm, record.usable_height_mm)
-    rectified = corner_utils.rectify_to_dims(image, corners, tw, th)
+    rectified = _rectify_and_trim(
+        image, corners,
+        record.excel_width_mm, record.excel_height_mm,
+        record.usable_width_mm, record.usable_height_mm,
+    )
     calibrated_path = _write_calibrated_image(
         rectified, calibrated_dir, record.slab_id,
     )
