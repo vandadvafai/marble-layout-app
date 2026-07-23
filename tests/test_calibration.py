@@ -478,3 +478,51 @@ def test_calibrated_image_removes_the_20mm_border(tmp_path):
         out[h // 2, 5], out[h // 2, w - 6],
     ]
     assert all(is_blue(px) for px in ring), [tuple(int(c) for c in p) for p in ring]
+
+
+def test_orientation_mismatch_still_approves(tmp_path):
+    """Regression: a portrait slab photographed landscape (or vice
+    versa) must APPROVE. Orientation is irrelevant to usability — the
+    approval gate validates the slab AFTER orientation is resolved, so
+    a 90 deg rotation is not an aspect mismatch. Before the gate fix
+    this slab was wrongly REJECTED with aspect_ratio_mismatch.
+    """
+    # Landscape green boundary: interior ~740 x 480 (aspect ~1.54).
+    w_px, h_px, margin = 820, 560, 40
+    img = np.full((h_px, w_px, 3), (60, 60, 60), np.uint8)
+    cv2.rectangle(img, (margin, margin), (w_px - margin, h_px - margin),
+                  (0, 255, 0), 4)
+    cv2.rectangle(img, (margin + 4, margin + 4),
+                  (w_px - margin - 4, h_px - margin - 4), (200, 180, 150), -1)
+    p = tmp_path / "slab_landscape.jpg"
+    cv2.imwrite(str(p), img)
+
+    # Excel is PORTRAIT (width < height), matching the slab transposed.
+    inp = SlabCalibrationInput(
+        slab_id="ORIENT-1", excel_width_mm=1550, excel_height_mm=2400,
+        original_image_path=p,
+    )
+    rec = calibrate_slab(inp, tmp_path / "cal")
+    assert rec.source_type == SourceType.GREEN_BOUNDARY
+    assert rec.calibration_status == CalibrationStatus.APPROVED
+    assert "aspect_ratio_mismatch" not in rec.warnings
+    assert abs(rec.aspect_delta) < 0.02
+    # Usable image in Excel (portrait) orientation, border cropped:
+    # (H, W) = (2400 - 40, 1550 - 40).
+    warped = cv2.imread(rec.calibrated_image_path)
+    assert warped.shape[:2] == (2360, 1510)
+
+
+def test_genuine_proportion_mismatch_still_flagged(tmp_path):
+    """The gate fix must NOT mask a real shape error. A near-square
+    green boundary against a strongly elongated Excel spec is a genuine
+    proportion mismatch (not just a rotation) and must NOT auto-approve.
+    """
+    img = _synthetic_slab_with_green_boundary(tmp_path)  # ~square boundary
+    inp = SlabCalibrationInput(
+        slab_id="BADSHAPE-1", excel_width_mm=1000, excel_height_mm=2500,
+        original_image_path=img,
+    )
+    rec = calibrate_slab(inp, tmp_path / "cal")
+    assert rec.calibration_status != CalibrationStatus.APPROVED
+    assert abs(rec.aspect_delta) > 0.08

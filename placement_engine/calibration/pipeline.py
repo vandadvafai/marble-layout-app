@@ -172,6 +172,28 @@ def _orient_corners_for_excel(
     return rotated, True
 
 
+def _oriented_aspect(detected_aspect: float, swapped: bool) -> float:
+    """Aspect of the slab AFTER orientation has been resolved.
+
+    ``_orient_corners_for_excel`` may rotate the detected quad 90° so
+    the rectified image comes out in the Excel orientation. The
+    approval gate must validate THAT (final calibrated) aspect against
+    the Excel aspect — not the raw detected aspect — because
+    orientation is irrelevant to whether a slab is usable: a portrait
+    slab photographed landscape is still the same slab. When the corner
+    order was swapped, the effective aspect is the reciprocal.
+
+    This changes only what the gate compares; detection, perspective
+    correction, scaling, the 20 mm crop and the usable dimensions are
+    all untouched. A genuine proportion error (the detected slab is a
+    different shape than Excel, not just rotated) still yields a large
+    delta and is still flagged.
+    """
+    if swapped and detected_aspect:
+        return 1.0 / detected_aspect
+    return detected_aspect
+
+
 def _calibrate_no_photo(
     slab: SlabCalibrationInput, usable_w: float, usable_h: float,
 ) -> CalibrationRecord:
@@ -277,7 +299,7 @@ def calibrate_slab(
         detected_aspect = corner_utils.image_aspect_from_bbox(
             green.width, green.height,
         )
-        oriented, _swapped = _orient_corners_for_excel(
+        oriented, swapped = _orient_corners_for_excel(
             detected_corners, detected_aspect, excel_aspect,
         )
         rectified = _rectify_and_trim(
@@ -291,7 +313,7 @@ def calibrate_slab(
             detected_corners=oriented,
             confidence=green.confidence,
             rectangularity=1.0,  # green boundary is axis-aligned
-            aspect_ratio=detected_aspect,
+            aspect_ratio=_oriented_aspect(detected_aspect, swapped),
             excel_aspect=excel_aspect,
             calibrated_image=rectified,
             calibrated_dir=calibrated_dir,
@@ -318,7 +340,7 @@ def calibrate_slab(
     detected_aspect = corner_utils.image_aspect_from_corners(
         detection.corners,
     )
-    oriented, _swapped = _orient_corners_for_excel(
+    oriented, swapped = _orient_corners_for_excel(
         detection.corners, detected_aspect, excel_aspect,
     )
     rectified = _rectify_and_trim(
@@ -339,7 +361,7 @@ def calibrate_slab(
         detected_corners=oriented,
         confidence=detection.confidence,
         rectangularity=detection.rectangularity,
-        aspect_ratio=detected_aspect,
+        aspect_ratio=_oriented_aspect(detected_aspect, swapped),
         excel_aspect=excel_aspect,
         calibrated_image=rectified,
         calibrated_dir=calibrated_dir,
